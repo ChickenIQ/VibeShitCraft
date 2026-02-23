@@ -2028,7 +2028,7 @@ func (s *Server) makeSpawnMobPacket(mob *MobEntity) *protocol.Packet {
 		protocol.WriteInt32(w, int32(mob.Z*32)) // Fixed-point Z
 		protocol.WriteByte(w, byte(mob.Yaw*256/360))
 		protocol.WriteByte(w, byte(mob.Pitch*256/360))
-		protocol.WriteByte(w, byte(mob.Yaw*256/360)) // Head Pitch
+		protocol.WriteByte(w, byte(mob.Pitch*256/360)) // Head Pitch
 		protocol.WriteInt16(w, 0)    // Velocity X
 		protocol.WriteInt16(w, 0)    // Velocity Y
 		protocol.WriteInt16(w, 0)    // Velocity Z
