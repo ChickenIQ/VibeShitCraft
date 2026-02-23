@@ -148,7 +148,7 @@ func TestF3NSpectatorToCreative(t *testing.T) {
 	// Simulate F3+N: client sends Player Abilities WITH Instant Break (0x08)
 	// Creative flags: 0x0D (Invulnerable|AllowFlying|InstantBreak)
 	pkt := protocol.MarshalPacket(0x13, func(w *bytes.Buffer) {
-		protocol.WriteByte(w, 0x0D)    // Flags with Instant Break
+		protocol.WriteByte(w, 0x0D) // Flags with Instant Break
 		protocol.WriteFloat32(w, 0.05)
 		protocol.WriteFloat32(w, 0.1)
 	})
@@ -247,11 +247,11 @@ func TestAdventureCannotPlaceBlocks(t *testing.T) {
 	// Simulate block placement at (10, 64, 10) on top face
 	var buf bytes.Buffer
 	protocol.WritePosition(&buf, 10, 64, 10)
-	protocol.WriteByte(&buf, 1)             // face = top
-	protocol.WriteSlotData(&buf, 4, 64, 0)  // Cobblestone
-	protocol.WriteByte(&buf, 8)             // cursorX
-	protocol.WriteByte(&buf, 8)             // cursorY
-	protocol.WriteByte(&buf, 8)             // cursorZ
+	protocol.WriteByte(&buf, 1)            // face = top
+	protocol.WriteSlotData(&buf, 4, 64, 0) // Cobblestone
+	protocol.WriteByte(&buf, 8)            // cursorX
+	protocol.WriteByte(&buf, 8)            // cursorY
+	protocol.WriteByte(&buf, 8)            // cursorZ
 
 	s.handlePlayPacket(player, &protocol.Packet{ID: 0x08, Data: buf.Bytes()})
 

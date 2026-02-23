@@ -8,23 +8,23 @@ type Ingredient struct {
 
 // CraftingRecipe represents a shaped crafting recipe.
 type CraftingRecipe struct {
-	Width       int
-	Height      int
-	Ingredients []Ingredient
-	ResultID    int16
-	ResultCount byte
+	Width        int
+	Height       int
+	Ingredients  []Ingredient
+	ResultID     int16
+	ResultCount  byte
 	ResultDamage int16
 }
 
 // craftingRecipes defines all available crafting recipes.
 var craftingRecipes = []CraftingRecipe{
 	// ===== Planks from logs =====
-	{1, 1, []Ingredient{{17, 0}}, 5, 4, 0},   // Oak Log → Oak Planks
-	{1, 1, []Ingredient{{17, 1}}, 5, 4, 1},   // Spruce Log → Spruce Planks
-	{1, 1, []Ingredient{{17, 2}}, 5, 4, 2},   // Birch Log → Birch Planks
-	{1, 1, []Ingredient{{17, 3}}, 5, 4, 3},   // Jungle Log → Jungle Planks
-	{1, 1, []Ingredient{{162, 0}}, 5, 4, 4},  // Acacia Log → Acacia Planks
-	{1, 1, []Ingredient{{162, 1}}, 5, 4, 5},  // Dark Oak Log → Dark Oak Planks
+	{1, 1, []Ingredient{{17, 0}}, 5, 4, 0},  // Oak Log → Oak Planks
+	{1, 1, []Ingredient{{17, 1}}, 5, 4, 1},  // Spruce Log → Spruce Planks
+	{1, 1, []Ingredient{{17, 2}}, 5, 4, 2},  // Birch Log → Birch Planks
+	{1, 1, []Ingredient{{17, 3}}, 5, 4, 3},  // Jungle Log → Jungle Planks
+	{1, 1, []Ingredient{{162, 0}}, 5, 4, 4}, // Acacia Log → Acacia Planks
+	{1, 1, []Ingredient{{162, 1}}, 5, 4, 5}, // Dark Oak Log → Dark Oak Planks
 
 	// ===== Sticks =====
 	{1, 2, []Ingredient{{5, -1}, {5, -1}}, 280, 4, 0},
