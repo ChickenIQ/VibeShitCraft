@@ -65,12 +65,6 @@ type Server struct {
 	nextEID  int32
 	stopCh   chan struct{}
 	world    *world.World
-	chests   map[world.BlockPos]*ChestData
-}
-
-// ChestData holds the 27-slot inventory of a placed chest.
-type ChestData struct {
-	Slots [27]Slot
 }
 
 // ItemEntity represents an item dropped on the ground.
@@ -137,8 +131,6 @@ type Player struct {
 	lastChunkZ   int32
 	DragSlots    []int16        // Slots being dragged over in mode 5
 	DragButton   int            // 0=left drag, 1=right drag
-	OpenWindowID byte           // 0 = no window open, 1 = chest
-	OpenChestPos world.BlockPos // Position of the open chest
 	mu           sync.Mutex
 }
 
@@ -156,7 +148,6 @@ func New(config Config) *Server {
 		nextEID:  1,
 		stopCh:   make(chan struct{}),
 		world:    world.NewWorld(seed),
-		chests:   make(map[world.BlockPos]*ChestData),
 	}
 }
 
@@ -884,13 +875,6 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			return
 		}
 
-		// Check if right-clicking on a chest to open it
-		clickedBlock := s.world.GetBlock(x, y, z)
-		if clickedBlock>>4 == 54 {
-			s.openChest(player, x, y, z)
-			return
-		}
-
 		// Don't place air
 		if itemID <= 0 || itemID > 255 {
 			// Abort placement, but we MUST resync the slot so the client doesn't
@@ -952,34 +936,6 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 
 		// Set block in world
 		blockState := uint16(itemID) << 4
-		// For chests, compute facing from player yaw
-		if itemID == 54 {
-			yaw := float64(player.Yaw)
-			yaw = math.Mod(yaw, 360)
-			if yaw < 0 {
-				yaw += 360
-			}
-			var facing uint16
-			switch {
-			case yaw >= 315 || yaw < 45:
-				facing = 3 // south (+Z) — player faces south, chest faces toward player
-			case yaw >= 45 && yaw < 135:
-				facing = 4 // west (-X)
-			case yaw >= 135 && yaw < 225:
-				facing = 2 // north (-Z)
-			case yaw >= 225 && yaw < 315:
-				facing = 5 // east (+X)
-			}
-			blockState = (54 << 4) | facing
-			// Create chest storage
-			pos := world.BlockPos{X: tx, Y: ty, Z: tz}
-			s.mu.Lock()
-			s.chests[pos] = &ChestData{}
-			for i := range s.chests[pos].Slots {
-				s.chests[pos].Slots[i].ItemID = -1
-			}
-			s.mu.Unlock()
-		}
 		s.world.SetBlock(tx, ty, tz, blockState)
 
 		// Broadcast block change to all players
