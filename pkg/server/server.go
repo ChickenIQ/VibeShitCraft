@@ -68,11 +68,12 @@ type Server struct {
 
 // ItemEntity represents an item dropped on the ground.
 type ItemEntity struct {
-	EntityID int32
-	ItemID   int16
-	Damage   int16
-	Count    byte
-	X, Y, Z  float64
+	EntityID   int32
+	ItemID     int16
+	Damage     int16
+	Count      byte
+	X, Y, Z    float64
+	VX, VY, VZ float64 // Velocity tracking for drops
 }
 
 // Slot represents an inventory slot.
@@ -747,9 +748,20 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			// Player is dropping an item
 			player.mu.Lock()
 			px, py, pz := player.X, player.Y, player.Z
+
+			// Drop base velocity calculations relative to player direction
+			f1 := math.Sin(float64(player.Yaw) * math.Pi / 180.0)
+			f2 := math.Cos(float64(player.Yaw) * math.Pi / 180.0)
+			f3 := math.Sin(float64(player.Pitch) * math.Pi / 180.0)
+			f4 := math.Cos(float64(player.Pitch) * math.Pi / 180.0)
+
+			vx := -f1 * f4 * 0.3
+			vy := -f3*0.3 + 0.1
+			vz := f2 * f4 * 0.3
+
 			player.mu.Unlock()
 			if itemID != -1 {
-				s.SpawnItem(px, py+1.5, pz, itemID, damage, count)
+				s.SpawnItem(px, py+1.5, pz, vx, vy, vz, itemID, damage, count)
 				log.Printf("Player %s dropped item %d:%d (creative)", player.Username, itemID, damage)
 			}
 			return
@@ -844,8 +856,21 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 					} else {
 						player.Cursor = Slot{ItemID: -1}
 					}
+
+					f1 := math.Sin(float64(player.Yaw) * math.Pi / 180.0)
+					f2 := math.Cos(float64(player.Yaw) * math.Pi / 180.0)
+					f3 := math.Sin(float64(player.Pitch) * math.Pi / 180.0)
+					f4 := math.Cos(float64(player.Pitch) * math.Pi / 180.0)
+
+					vx := -f1 * f4 * 0.3
+					vy := -f3*0.3 + 0.1
+					vz := f2 * f4 * 0.3
+
+					vitemID := player.Cursor.ItemID
+					vdamage := player.Cursor.Damage
+
 					player.mu.Unlock() // unlock to spawn
-					s.SpawnItem(px, py+1.5, pz, player.Cursor.ItemID, player.Cursor.Damage, dropCount)
+					s.SpawnItem(px, py+1.5, pz, vx, vy, vz, vitemID, vdamage, dropCount)
 					player.mu.Lock()
 				}
 			} else if slotNum >= 0 && slotNum < 45 {
@@ -857,13 +882,22 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 						if player.Inventory[slotNum].Count <= 0 {
 							player.Inventory[slotNum] = Slot{ItemID: -1}
 						}
-					} else {
 						player.Inventory[slotNum] = Slot{ItemID: -1}
 					}
 					dropItemID := player.Inventory[slotNum].ItemID
 					dropDamage := player.Inventory[slotNum].Damage
+
+					f1 := math.Sin(float64(player.Yaw) * math.Pi / 180.0)
+					f2 := math.Cos(float64(player.Yaw) * math.Pi / 180.0)
+					f3 := math.Sin(float64(player.Pitch) * math.Pi / 180.0)
+					f4 := math.Cos(float64(player.Pitch) * math.Pi / 180.0)
+
+					vx := -f1 * f4 * 0.3
+					vy := -f3*0.3 + 0.1
+					vz := f2 * f4 * 0.3
+
 					player.mu.Unlock() // unlock to spawn
-					s.SpawnItem(px, py+1.5, pz, dropItemID, dropDamage, dropCount)
+					s.SpawnItem(px, py+1.5, pz, vx, vy, vz, dropItemID, dropDamage, dropCount)
 					player.mu.Lock()
 				}
 			}
@@ -883,8 +917,17 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 				player.Cursor = Slot{ItemID: -1}
 			}
 
+			f1 := math.Sin(float64(player.Yaw) * math.Pi / 180.0)
+			f2 := math.Cos(float64(player.Yaw) * math.Pi / 180.0)
+			f3 := math.Sin(float64(player.Pitch) * math.Pi / 180.0)
+			f4 := math.Cos(float64(player.Pitch) * math.Pi / 180.0)
+
+			vx := -f1 * f4 * 0.3
+			vy := -f3*0.3 + 0.1
+			vz := f2 * f4 * 0.3
+
 			player.mu.Unlock()
-			s.SpawnItem(px, py+1.5, pz, dropItemID, dropDamage, dropCount)
+			s.SpawnItem(px, py+1.5, pz, vx, vy, vz, dropItemID, dropDamage, dropCount)
 			player.mu.Lock()
 		}
 
@@ -1327,8 +1370,11 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 		return
 	}
 
-	// Spawn item at the center of the broken block
-	s.SpawnItem(float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, itemID, damage, count)
+	// Spawn item at the center of the broken block with random velocity
+	vx := (rand.Float64()*0.2 - 0.1)
+	vy := 0.2
+	vz := (rand.Float64()*0.2 - 0.1)
+	s.SpawnItem(float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, vx, vy, vz, itemID, damage, count)
 
 	log.Printf("Player %s broke block %d at (%d, %d, %d), spawned item %d:%d (count: %d)", player.Username, blockID, x, y, z, itemID, damage, count)
 }
@@ -1804,7 +1850,7 @@ func ParseGameMode(s string) (byte, bool) {
 }
 
 // SpawnItem creates an item entity at the given position and broadcasts it.
-func (s *Server) SpawnItem(x, y, z float64, itemID int16, damage int16, count byte) {
+func (s *Server) SpawnItem(x, y, z float64, vx, vy, vz float64, itemID int16, damage int16, count byte) {
 	s.mu.Lock()
 	eid := s.nextEID
 	s.nextEID++
@@ -1817,6 +1863,9 @@ func (s *Server) SpawnItem(x, y, z float64, itemID int16, damage int16, count by
 		X:        x,
 		Y:        y,
 		Z:        z,
+		VX:       vx,
+		VY:       vy,
+		VZ:       vz,
 	}
 	s.entities[eid] = item
 	s.mu.Unlock()
@@ -1834,7 +1883,15 @@ func (s *Server) broadcastSpawnItem(item *ItemEntity) {
 		protocol.WriteInt32(w, int32(item.Z*32))
 		protocol.WriteByte(w, 0)  // Pitch
 		protocol.WriteByte(w, 0)  // Yaw
-		protocol.WriteInt32(w, 0) // Data (needs to be non-zero for some objects, but 0 often means no velocity)
+		protocol.WriteInt32(w, 0) // Data for thrower (0 usually)
+	})
+
+	// Entity Velocity - 0x12
+	velocityPkt := protocol.MarshalPacket(0x12, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, item.EntityID)
+		protocol.WriteInt16(w, int16(item.VX*8000))
+		protocol.WriteInt16(w, int16(item.VY*8000))
+		protocol.WriteInt16(w, int16(item.VZ*8000))
 	})
 
 	// Entity Metadata - 0x1C
@@ -1853,6 +1910,7 @@ func (s *Server) broadcastSpawnItem(item *ItemEntity) {
 		p.mu.Lock()
 		if p.Conn != nil {
 			protocol.WritePacket(p.Conn, spawnObj)
+			protocol.WritePacket(p.Conn, velocityPkt)
 			protocol.WritePacket(p.Conn, metadata)
 		}
 		p.mu.Unlock()
