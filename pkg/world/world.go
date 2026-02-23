@@ -240,12 +240,15 @@ func BlockToItemID(blockState uint16) (int16, int16, byte) {
 		return -1, 0, 0
 	case 8, 9, 10, 11: // water/lava
 		return -1, 0, 0
-	case 20, 95, 102: // glass, glass panes
+	case 20, 95, 102, 160: // glass, stained glass, glass panes, stained glass panes
 		return -1, 0, 0
 	case 2: // grass block -> drops dirt
 		return 3, 0, 1
-	case 1: // stone -> drops cobblestone
-		return 4, 0, 1
+	case 1: // stone -> meta 0 drops cobblestone, variants (granite, diorite, andesite) drop themselves
+		if metadata == 0 {
+			return 4, 0, 1
+		}
+		return 1, metadata, 1
 	case 17, 162: // logs -> drop themselves, strip rotation/orientation
 		// Log metadata: lowest 2 bits are wood type, next 2 are orientation
 		return int16(blockID), metadata & 0x03, 1
@@ -325,18 +328,69 @@ func BlockToItemID(blockState uint16) (int16, int16, byte) {
 	case 169: // sea lantern -> 2-3 prismarine crystals
 		return 410, 0, 2
 	case 3: // dirt
-		return 3, 0, 1
+		if metadata == 1 {
+			return 3, 1, 1 // Coarse dirt drops itself
+		}
+		return 3, 0, 1 // Regular dirt and podzol drop regular dirt
 	case 4: // cobblestone
 		return 4, 0, 1
 	case 5: // planks
 		return 5, metadata, 1
+	case 6: // sapling -> strip age bit, keep tree type
+		return 6, metadata & 0x07, 1
 	case 12: // sand
 		return 12, metadata, 1
 	case 13: // gravel
 		return 13, 0, 1
+	case 19: // sponge (dry/wet)
+		return 19, metadata, 1
+	case 24: // sandstone variants
+		return 24, metadata, 1
+	case 26: // bed -> only drop from foot part
+		if metadata&0x08 != 0 {
+			return -1, 0, 0
+		}
+		return 355, 0, 1
+	case 35: // wool (16 colors)
+		return 35, metadata, 1
+	case 37: // dandelion
+		return 37, 0, 1
+	case 38: // flowers (poppy variants)
+		return 38, metadata, 1
+	case 43: // double stone slab -> drops 2 stone slabs
+		return 44, metadata & 0x07, 2
+	case 44: // stone slab -> strip upper/lower bit
+		return 44, metadata & 0x07, 1
 	case 54: // chest
 		return 54, 0, 1
+	case 61, 62: // furnace / lit furnace -> always drop furnace
+		return 61, 0, 1
+	case 97: // monster egg (silverfish blocks)
+		return 97, metadata, 1
+	case 98: // stone bricks variants
+		return 98, metadata, 1
+	case 125: // double wooden slab -> drops 2 wooden slabs
+		return 126, metadata & 0x07, 2
+	case 126: // wooden slab -> strip upper/lower bit
+		return 126, metadata & 0x07, 1
+	case 139: // cobblestone wall (cobblestone/mossy)
+		return 139, metadata, 1
+	case 145: // anvil -> strip rotation, keep damage level
+		return 145, (metadata >> 2) & 0x03, 1
+	case 155: // quartz block -> pillar orientations all drop as pillar
+		if metadata >= 2 {
+			return 155, 2, 1
+		}
+		return 155, metadata, 1
+	case 159: // stained clay (16 colors)
+		return 159, metadata, 1
+	case 168: // prismarine variants
+		return 168, metadata, 1
+	case 171: // carpet (16 colors)
+		return 171, metadata, 1
+	case 179: // red sandstone variants
+		return 179, metadata, 1
 	default:
-		return int16(blockID), metadata, 1
+		return int16(blockID), 0, 1
 	}
 }
