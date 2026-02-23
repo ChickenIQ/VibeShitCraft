@@ -263,20 +263,27 @@ func BlockToItemID(blockState uint16) (int16, int16, byte) {
 		return 295, 0, 1 // Wheat seeds
 	case 60: // farmland -> drops dirt
 		return 3, 0, 1
-	case 64: // oak door block
-		return 324, 0, 1
-	case 71: // iron door block
-		return 330, 0, 1
-	case 193: // spruce door block
-		return 427, 0, 1
-	case 194: // birch door block
-		return 428, 0, 1
-	case 195: // jungle door block
-		return 429, 0, 1
-	case 196: // acacia door block
-		return 430, 0, 1
-	case 197: // dark oak door block
-		return 431, 0, 1
+	case 64, 71, 193, 194, 195, 196, 197: // Doors
+		if metadata&0x08 != 0 {
+			return -1, 0, 0
+		}
+		switch blockID {
+		case 64:
+			return 324, 0, 1
+		case 71:
+			return 330, 0, 1
+		case 193:
+			return 427, 0, 1
+		case 194:
+			return 428, 0, 1
+		case 195:
+			return 429, 0, 1
+		case 196:
+			return 430, 0, 1
+		case 197:
+			return 431, 0, 1
+		}
+		return -1, 0, 0
 	case 175: // double plant
 		if metadata&0x08 != 0 {
 			return -1, 0, 0
