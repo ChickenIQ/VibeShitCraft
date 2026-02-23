@@ -11,12 +11,14 @@ type BlockPos struct {
 type World struct {
 	mu     sync.RWMutex
 	blocks map[BlockPos]uint16 // block state: blockID << 4 | metadata
+	Gen    *Generator
 }
 
-// NewWorld creates a new World.
-func NewWorld() *World {
+// NewWorld creates a new World with the given seed for terrain generation.
+func NewWorld(seed int64) *World {
 	return &World{
 		blocks: make(map[BlockPos]uint16),
+		Gen:    NewGenerator(seed),
 	}
 }
 
@@ -28,7 +30,7 @@ func (w *World) GetBlock(x, y, z int32) uint16 {
 		return b
 	}
 	w.mu.RUnlock()
-	return FlatWorldBlock(y)
+	return w.Gen.BlockAt(int(x), int(y), int(z))
 }
 
 // SetBlock sets the block state at the given position.

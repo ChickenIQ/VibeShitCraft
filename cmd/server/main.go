@@ -14,12 +14,21 @@ func main() {
 	address := flag.String("address", ":25565", "Server address to listen on")
 	maxPlayers := flag.Int("max-players", 20, "Maximum number of players")
 	motd := flag.String("motd", "A VibeShitCraft Server", "Server MOTD")
+	seed := flag.Int64("seed", 0, "World seed (0 = random)")
+	defaultGameMode := flag.String("default-gamemode", "survival", "Default game mode (survival, creative, adventure, spectator)")
 	flag.Parse()
 
+	gameMode, ok := server.ParseGameMode(*defaultGameMode)
+	if !ok {
+		log.Fatalf("Invalid default game mode: %s", *defaultGameMode)
+	}
+
 	config := server.Config{
-		Address:    *address,
-		MaxPlayers: *maxPlayers,
-		MOTD:       *motd,
+		Address:         *address,
+		MaxPlayers:      *maxPlayers,
+		MOTD:            *motd,
+		Seed:            *seed,
+		DefaultGameMode: gameMode,
 	}
 
 	srv := server.New(config)

@@ -171,3 +171,103 @@ func TestAddItemStackOverflow(t *testing.T) {
 		t.Errorf("new slot = %d, want 37", slot)
 	}
 }
+
+func TestGamemodeConstants(t *testing.T) {
+	if GameModeSurvival != 0 {
+		t.Errorf("GameModeSurvival = %d, want 0", GameModeSurvival)
+	}
+	if GameModeCreative != 1 {
+		t.Errorf("GameModeCreative = %d, want 1", GameModeCreative)
+	}
+	if GameModeAdventure != 2 {
+		t.Errorf("GameModeAdventure = %d, want 2", GameModeAdventure)
+	}
+	if GameModeSpectator != 3 {
+		t.Errorf("GameModeSpectator = %d, want 3", GameModeSpectator)
+	}
+}
+
+func TestParseGameMode(t *testing.T) {
+	tests := []struct {
+		input string
+		want  byte
+		ok    bool
+	}{
+		{"survival", GameModeSurvival, true},
+		{"Survival", GameModeSurvival, true},
+		{"s", GameModeSurvival, true},
+		{"0", GameModeSurvival, true},
+		{"creative", GameModeCreative, true},
+		{"Creative", GameModeCreative, true},
+		{"c", GameModeCreative, true},
+		{"1", GameModeCreative, true},
+		{"adventure", GameModeAdventure, true},
+		{"a", GameModeAdventure, true},
+		{"2", GameModeAdventure, true},
+		{"spectator", GameModeSpectator, true},
+		{"sp", GameModeSpectator, true},
+		{"3", GameModeSpectator, true},
+		{"invalid", 0, false},
+		{"", 0, false},
+		{"4", 0, false},
+	}
+	for _, tt := range tests {
+		got, ok := ParseGameMode(tt.input)
+		if ok != tt.ok || got != tt.want {
+			t.Errorf("ParseGameMode(%q) = (%d, %v), want (%d, %v)", tt.input, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func TestGameModeName(t *testing.T) {
+	tests := []struct {
+		mode byte
+		want string
+	}{
+		{GameModeSurvival, "Survival"},
+		{GameModeCreative, "Creative"},
+		{GameModeAdventure, "Adventure"},
+		{GameModeSpectator, "Spectator"},
+		{255, "Unknown(255)"},
+	}
+	for _, tt := range tests {
+		got := GameModeName(tt.mode)
+		if got != tt.want {
+			t.Errorf("GameModeName(%d) = %q, want %q", tt.mode, got, tt.want)
+		}
+	}
+}
+
+func TestFaceOffset(t *testing.T) {
+	tests := []struct {
+		face       byte
+		dx, dy, dz int32
+	}{
+		{0, 0, -1, 0}, // bottom
+		{1, 0, 1, 0},  // top
+		{2, 0, 0, -1}, // north
+		{3, 0, 0, 1},  // south
+		{4, -1, 0, 0}, // west
+		{5, 1, 0, 0},  // east
+	}
+	for _, tt := range tests {
+		x, y, z := faceOffset(10, 20, 30, tt.face)
+		if x != 10+tt.dx || y != 20+tt.dy || z != 30+tt.dz {
+			t.Errorf("faceOffset(10,20,30,%d) = (%d,%d,%d), want (%d,%d,%d)",
+				tt.face, x, y, z, 10+tt.dx, 20+tt.dy, 30+tt.dz)
+		}
+	}
+}
+
+func TestPlayerDefaultGameMode(t *testing.T) {
+	config := Config{
+		Address:         "127.0.0.1:0",
+		MaxPlayers:      10,
+		MOTD:            "Test",
+		DefaultGameMode: GameModeCreative,
+	}
+	srv := New(config)
+	if srv.config.DefaultGameMode != GameModeCreative {
+		t.Errorf("DefaultGameMode = %d, want %d", srv.config.DefaultGameMode, GameModeCreative)
+	}
+}

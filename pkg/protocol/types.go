@@ -317,3 +317,160 @@ func WriteSlotData(w io.Writer, itemID int16, count byte, damage int16) error {
 	_, err := w.Write([]byte{0x00})
 	return err
 }
+
+// ReadSlotData reads Minecraft slot data from the reader.
+// Returns itemID (-1 if empty), count, and damage.
+func ReadSlotData(r io.Reader) (itemID int16, count byte, damage int16, err error) {
+	itemID, err = ReadInt16(r)
+	if err != nil {
+		return -1, 0, 0, err
+	}
+	if itemID == -1 {
+		return -1, 0, 0, nil
+	}
+	b, err := ReadByte(r)
+	if err != nil {
+		return -1, 0, 0, err
+	}
+	count = b
+	damage, err = ReadInt16(r)
+	if err != nil {
+		return -1, 0, 0, err
+	}
+	// Read NBT tag type byte — 0x00 means no NBT
+	nbtTag, err := ReadByte(r)
+	if err != nil {
+		return -1, 0, 0, err
+	}
+	if nbtTag != 0x00 {
+		// Skip NBT compound data — for now consume bytes until we see the end tag.
+		// In practice, MC 1.8 creative inventory sends simple items with no NBT.
+		err = skipNBTCompound(r)
+		if err != nil {
+			return -1, 0, 0, err
+		}
+	}
+	return itemID, count, damage, nil
+}
+
+// ReadInt16 reads a big-endian signed 16-bit integer.
+func ReadInt16(r io.Reader) (int16, error) {
+	var buf [2]byte
+	_, err := io.ReadFull(r, buf[:])
+	if err != nil {
+		return 0, err
+	}
+	return int16(binary.BigEndian.Uint16(buf[:])), nil
+}
+
+// skipNBTCompound skips an NBT compound tag by reading bytes until the end tag (0x00) at depth 0.
+func skipNBTCompound(r io.Reader) error {
+	buf := make([]byte, 256)
+	// Read and discard bytes in chunks until we find the pattern.
+	// This is a simplistic approach; for our use case, items from creative
+	// inventory rarely have complex NBT.
+	depth := 1
+	for depth > 0 {
+		b, err := ReadByte(r)
+		if err != nil {
+			return err
+		}
+		_ = buf
+		switch b {
+		case 0x00: // TAG_End
+			depth--
+		case 0x0A: // TAG_Compound (nested)
+			// Skip the name
+			if err := skipNBTString(r); err != nil {
+				return err
+			}
+			depth++
+		default:
+			// Skip the tag name and its payload
+			if err := skipNBTString(r); err != nil {
+				return err
+			}
+			if err := skipNBTPayload(r, b); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func skipNBTString(r io.Reader) error {
+	nameLen, err := ReadUint16(r)
+	if err != nil {
+		return err
+	}
+	if nameLen > 0 {
+		buf := make([]byte, nameLen)
+		_, err = io.ReadFull(r, buf)
+		return err
+	}
+	return nil
+}
+
+func skipNBTPayload(r io.Reader, tagType byte) error {
+	switch tagType {
+	case 1: // TAG_Byte
+		_, err := ReadByte(r)
+		return err
+	case 2: // TAG_Short
+		_, err := ReadInt16(r)
+		return err
+	case 3: // TAG_Int
+		_, err := ReadInt32(r)
+		return err
+	case 4: // TAG_Long
+		_, err := ReadInt64(r)
+		return err
+	case 5: // TAG_Float
+		_, err := ReadFloat32(r)
+		return err
+	case 6: // TAG_Double
+		_, err := ReadFloat64(r)
+		return err
+	case 7: // TAG_Byte_Array
+		length, err := ReadInt32(r)
+		if err != nil {
+			return err
+		}
+		buf := make([]byte, length)
+		_, err = io.ReadFull(r, buf)
+		return err
+	case 8: // TAG_String
+		return skipNBTString(r)
+	case 9: // TAG_List
+		listType, err := ReadByte(r)
+		if err != nil {
+			return err
+		}
+		listLen, err := ReadInt32(r)
+		if err != nil {
+			return err
+		}
+		for i := int32(0); i < listLen; i++ {
+			if listType == 0x0A {
+				if err := skipNBTCompound(r); err != nil {
+					return err
+				}
+			} else {
+				if err := skipNBTPayload(r, listType); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	case 11: // TAG_Int_Array
+		length, err := ReadInt32(r)
+		if err != nil {
+			return err
+		}
+		buf := make([]byte, length*4)
+		_, err = io.ReadFull(r, buf)
+		return err
+	default:
+		return fmt.Errorf("unknown NBT tag type: %d", tagType)
+	}
+}

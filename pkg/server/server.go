@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,11 +16,24 @@ import (
 	"github.com/StoreStation/VibeShitCraft/pkg/world"
 )
 
+// Gamemode constants matching Minecraft protocol values.
+const (
+	GameModeSurvival  byte = 0
+	GameModeCreative  byte = 1
+	GameModeAdventure byte = 2
+	GameModeSpectator byte = 3
+)
+
+// DefaultSeed is used when no seed is provided (0 means random).
+const DefaultSeed = 0
+
 // Config holds server configuration.
 type Config struct {
-	Address    string
-	MaxPlayers int
-	MOTD       string
+	Address         string
+	MaxPlayers      int
+	MOTD            string
+	Seed            int64
+	DefaultGameMode byte
 }
 
 // DefaultConfig returns a default server configuration.
@@ -29,6 +43,14 @@ func DefaultConfig() Config {
 		MaxPlayers: 20,
 		MOTD:       "A VibeShitCraft Server",
 	}
+}
+
+// ViewDistance is the radius (in chunks) around the player to keep loaded.
+const ViewDistance = 7
+
+// ChunkPos represents a chunk coordinate.
+type ChunkPos struct {
+	X, Z int32
 }
 
 // Server represents a Minecraft 1.8 server.
@@ -51,27 +73,36 @@ type Slot struct {
 
 // Player represents a connected player.
 type Player struct {
-	EntityID  int32
-	Username  string
-	UUID      [16]byte
-	Conn      net.Conn
-	State     int
-	X, Y, Z   float64
-	Yaw       float32
-	Pitch     float32
-	OnGround  bool
-	Inventory [45]Slot
-	mu        sync.Mutex
+	EntityID     int32
+	Username     string
+	UUID         [16]byte
+	Conn         net.Conn
+	State        int
+	GameMode     byte
+	X, Y, Z      float64
+	Yaw          float32
+	Pitch        float32
+	OnGround     bool
+	Inventory    [45]Slot
+	loadedChunks map[ChunkPos]bool
+	lastChunkX   int32
+	lastChunkZ   int32
+	mu           sync.Mutex
 }
 
 // New creates a new server with the given configuration.
 func New(config Config) *Server {
+	seed := config.Seed
+	if seed == 0 {
+		seed = time.Now().UnixNano()
+	}
+	log.Printf("World seed: %d", seed)
 	return &Server{
 		config:  config,
 		players: make(map[int32]*Player),
 		nextEID: 1,
 		stopCh:  make(chan struct{}),
-		world:   world.NewWorld(),
+		world:   world.NewWorld(seed),
 	}
 }
 
@@ -248,14 +279,18 @@ func (s *Server) handleLoginStart(conn net.Conn, pkt *protocol.Packet) (*Player,
 	s.nextEID++
 	s.mu.Unlock()
 
+	// Find spawn height at (8, 8) by checking the generator
+	spawnY := float64(s.world.Gen.SurfaceHeight(8, 8)) + 1.0
+
 	player := &Player{
 		EntityID: eid,
 		Username: username,
 		UUID:     uuid,
 		Conn:     conn,
 		State:    protocol.StatePlay,
+		GameMode: s.config.DefaultGameMode,
 		X:        8,
-		Y:        5, // Above the flat world surface
+		Y:        spawnY,
 		Z:        8,
 		Yaw:      0,
 		Pitch:    0,
@@ -285,28 +320,23 @@ func (s *Server) handlePlay(player *Player) {
 	// Send Join Game
 	joinGame := protocol.MarshalPacket(0x01, func(w *bytes.Buffer) {
 		protocol.WriteInt32(w, player.EntityID)            // Entity ID
-		protocol.WriteByte(w, 0)                           // Gamemode: survival
+		protocol.WriteByte(w, player.GameMode)             // Gamemode
 		protocol.WriteByte(w, 0)                           // Dimension: overworld
 		protocol.WriteByte(w, 0)                           // Difficulty: peaceful
 		protocol.WriteByte(w, byte(s.config.MaxPlayers))   // Max players
-		protocol.WriteString(w, "flat")                    // Level type
+		protocol.WriteString(w, "default")                 // Level type
 		protocol.WriteBool(w, false)                       // Reduced debug info
 	})
 	protocol.WritePacket(conn, joinGame)
 
 	// Send Spawn Position
 	spawnPos := protocol.MarshalPacket(0x05, func(w *bytes.Buffer) {
-		protocol.WritePosition(w, 8, 5, 8)
+		protocol.WritePosition(w, 8, int32(player.Y), 8)
 	})
 	protocol.WritePacket(conn, spawnPos)
 
 	// Send Player Abilities
-	abilities := protocol.MarshalPacket(0x39, func(w *bytes.Buffer) {
-		protocol.WriteByte(w, 0x00)       // Flags (none)
-		protocol.WriteFloat32(w, 0.05)    // Flying speed
-		protocol.WriteFloat32(w, 0.1)     // Walking speed (FOV modifier)
-	})
-	protocol.WritePacket(conn, abilities)
+	s.sendPlayerAbilities(player)
 
 	// Send Player Position and Look
 	posLook := protocol.MarshalPacket(0x08, func(w *bytes.Buffer) {
@@ -319,8 +349,8 @@ func (s *Server) handlePlay(player *Player) {
 	})
 	protocol.WritePacket(conn, posLook)
 
-	// Send chunks around spawn
-	s.sendSpawnChunks(conn)
+	// Send chunks around player
+	s.sendSpawnChunks(player)
 
 	// Send any block modifications to the new player
 	s.sendBlockModifications(conn)
@@ -381,6 +411,11 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		if len(message) > 256 {
 			message = message[:256]
 		}
+		// Route commands (messages starting with /)
+		if strings.HasPrefix(message, "/") {
+			s.handleCommand(player, message)
+			return
+		}
 		chatMsg := chat.Message{
 			Text: "",
 			Extra: []chat.Message{
@@ -403,6 +438,7 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		player.OnGround = onGround
 		player.mu.Unlock()
 		s.broadcastEntityTeleport(player)
+		s.sendChunkUpdates(player)
 
 	case 0x05: // Player Look
 		yaw, _ := protocol.ReadFloat32(r)
@@ -431,6 +467,7 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		player.OnGround = onGround
 		player.mu.Unlock()
 		s.broadcastEntityTeleport(player)
+		s.sendChunkUpdates(player)
 
 	case 0x03: // Player (on ground)
 		// Just an update for on ground status
@@ -446,7 +483,13 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		status, _ := protocol.ReadByte(r)
 		x, y, z, _ := protocol.ReadPosition(r)
 		_, _ = protocol.ReadByte(r) // face
-		if status == 2 { // Finished digging
+		if player.GameMode == GameModeSpectator {
+			return // spectators can't interact
+		}
+		if status == 0 && player.GameMode == GameModeCreative {
+			// Creative mode: instant break on start digging
+			s.handleBlockBreak(player, x, y, z)
+		} else if status == 2 { // Finished digging (survival)
 			s.handleBlockBreak(player, x, y, z)
 		}
 
@@ -457,11 +500,80 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 	case 0x15: // Client Settings
 		// Ignore for now
 
+	case 0x13: // Player Abilities (serverbound)
+		_, _ = protocol.ReadByte(r)    // Flags from client
+		_, _ = protocol.ReadFloat32(r) // Flying speed
+		_, _ = protocol.ReadFloat32(r) // Walking speed
+		// Respond with the server-authoritative abilities for this gamemode
+		s.sendPlayerAbilities(player)
+
 	case 0x17: // Plugin Message
 		// Ignore for now
 
 	case 0x16: // Client Status
 		// Ignore for now
+
+	case 0x08: // Block Placement
+		x, y, z, _ := protocol.ReadPosition(r)
+		face, _ := protocol.ReadByte(r)
+		// Read held item slot data
+		itemID, _, _, _ := protocol.ReadSlotData(r)
+		// Cursor position (3 bytes) — ignored
+		_, _ = protocol.ReadByte(r)
+		_, _ = protocol.ReadByte(r)
+		_, _ = protocol.ReadByte(r)
+
+		if player.GameMode == GameModeSpectator {
+			return // spectators can't place blocks
+		}
+
+		// Special position (-1, -1, -1) means "use item" not placement
+		if x == -1 && y == 255 && z == -1 {
+			return
+		}
+
+		// Don't place air
+		if itemID <= 0 || itemID > 255 {
+			return
+		}
+
+		// Calculate target position from face
+		tx, ty, tz := faceOffset(x, y, z, face)
+
+		// Set block in world
+		blockState := uint16(itemID) << 4
+		s.world.SetBlock(tx, ty, tz, blockState)
+
+		// Broadcast block change to all players
+		s.broadcastBlockChange(tx, ty, tz, blockState)
+
+		log.Printf("Player %s placed block %d at (%d, %d, %d)", player.Username, itemID, tx, ty, tz)
+
+	case 0x10: // Creative Inventory Action
+		slotNum, _ := protocol.ReadInt16(r)
+		itemID, count, damage, _ := protocol.ReadSlotData(r)
+
+		if player.GameMode != GameModeCreative {
+			return
+		}
+
+		// Validate slot range (0-44 for player inventory, -1 for dropping)
+		if slotNum == -1 {
+			// Player is dropping an item — ignore for now
+			return
+		}
+		if slotNum < 0 || slotNum > 44 {
+			return
+		}
+
+		player.mu.Lock()
+		if itemID == -1 {
+			// Clearing slot
+			player.Inventory[slotNum] = Slot{ItemID: -1}
+		} else {
+			player.Inventory[slotNum] = Slot{ItemID: itemID, Count: count, Damage: damage}
+		}
+		player.mu.Unlock()
 	}
 }
 
@@ -488,22 +600,99 @@ func (s *Server) keepAliveLoop(player *Player, stop chan struct{}) {
 	}
 }
 
-func (s *Server) sendSpawnChunks(conn net.Conn) {
-	chunkData, primaryBitMask := world.GenerateFlatChunkData()
+func (s *Server) sendSpawnChunks(player *Player) {
+	playerChunkX := int32(int(player.X) >> 4)
+	playerChunkZ := int32(int(player.Z) >> 4)
 
-	// Send a 7x7 grid of chunks around spawn
-	for cx := -3; cx <= 3; cx++ {
-		for cz := -3; cz <= 3; cz++ {
-			pkt := protocol.MarshalPacket(0x21, func(w *bytes.Buffer) {
-				protocol.WriteInt32(w, int32(cx))         // Chunk X
-				protocol.WriteInt32(w, int32(cz))         // Chunk Z
-				protocol.WriteBool(w, true)               // Ground-up continuous
-				protocol.WriteUint16(w, primaryBitMask)   // Primary bit mask
-				protocol.WriteVarInt(w, int32(len(chunkData))) // Size
-				w.Write(chunkData)                         // Data
-			})
-			protocol.WritePacket(conn, pkt)
+	player.mu.Lock()
+	player.loadedChunks = make(map[ChunkPos]bool)
+	player.lastChunkX = playerChunkX
+	player.lastChunkZ = playerChunkZ
+	player.mu.Unlock()
+
+	// Send chunks in a square around the player's chunk
+	for cx := playerChunkX - ViewDistance; cx <= playerChunkX+ViewDistance; cx++ {
+		for cz := playerChunkZ - ViewDistance; cz <= playerChunkZ+ViewDistance; cz++ {
+			s.sendChunkColumn(player, cx, cz)
 		}
+	}
+}
+
+// sendChunkColumn generates and sends a single chunk column to a player.
+func (s *Server) sendChunkColumn(player *Player, cx, cz int32) {
+	pos := ChunkPos{cx, cz}
+	player.mu.Lock()
+	if player.loadedChunks[pos] {
+		player.mu.Unlock()
+		return
+	}
+	player.loadedChunks[pos] = true
+	player.mu.Unlock()
+
+	chunkData, primaryBitMask := s.world.Gen.GenerateChunkData(int(cx), int(cz))
+	pkt := protocol.MarshalPacket(0x21, func(w *bytes.Buffer) {
+		protocol.WriteInt32(w, cx)                     // Chunk X
+		protocol.WriteInt32(w, cz)                     // Chunk Z
+		protocol.WriteBool(w, true)                    // Ground-up continuous
+		protocol.WriteUint16(w, primaryBitMask)        // Primary bit mask
+		protocol.WriteVarInt(w, int32(len(chunkData))) // Size
+		w.Write(chunkData)                             // Data
+	})
+	player.mu.Lock()
+	protocol.WritePacket(player.Conn, pkt)
+	player.mu.Unlock()
+}
+
+// sendChunkUpdates streams new chunks to the player when they cross chunk boundaries
+// and unloads chunks that are too far away.
+func (s *Server) sendChunkUpdates(player *Player) {
+	player.mu.Lock()
+	currentChunkX := int32(int(player.X) >> 4)
+	currentChunkZ := int32(int(player.Z) >> 4)
+
+	if currentChunkX == player.lastChunkX && currentChunkZ == player.lastChunkZ {
+		player.mu.Unlock()
+		return
+	}
+
+	player.lastChunkX = currentChunkX
+	player.lastChunkZ = currentChunkZ
+	player.mu.Unlock()
+
+	// Send new chunks that are now in range
+	for cx := currentChunkX - ViewDistance; cx <= currentChunkX+ViewDistance; cx++ {
+		for cz := currentChunkZ - ViewDistance; cz <= currentChunkZ+ViewDistance; cz++ {
+			s.sendChunkColumn(player, cx, cz)
+		}
+	}
+
+	// Unload chunks that are now out of range
+	player.mu.Lock()
+	var toUnload []ChunkPos
+	for pos := range player.loadedChunks {
+		dx := pos.X - currentChunkX
+		dz := pos.Z - currentChunkZ
+		if dx < -ViewDistance || dx > ViewDistance || dz < -ViewDistance || dz > ViewDistance {
+			toUnload = append(toUnload, pos)
+		}
+	}
+	for _, pos := range toUnload {
+		delete(player.loadedChunks, pos)
+	}
+	player.mu.Unlock()
+
+	// Send unload packets (empty chunk with primary bit mask 0)
+	for _, pos := range toUnload {
+		pkt := protocol.MarshalPacket(0x21, func(w *bytes.Buffer) {
+			protocol.WriteInt32(w, pos.X)
+			protocol.WriteInt32(w, pos.Z)
+			protocol.WriteBool(w, true)     // Ground-up continuous
+			protocol.WriteUint16(w, 0)      // Primary bit mask: 0 = unload
+			protocol.WriteVarInt(w, 0)      // Size: 0
+		})
+		player.mu.Lock()
+		protocol.WritePacket(player.Conn, pkt)
+		player.mu.Unlock()
 	}
 }
 
@@ -574,7 +763,7 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 		protocol.WriteUUID(w, target.UUID)
 		protocol.WriteString(w, target.Username)
 		protocol.WriteVarInt(w, 0) // Number of properties
-		protocol.WriteVarInt(w, 0) // Gamemode: survival
+		protocol.WriteVarInt(w, int32(target.GameMode)) // Gamemode
 		protocol.WriteVarInt(w, 0) // Ping
 		protocol.WriteBool(w, false) // Has display name
 	})
@@ -713,6 +902,12 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 
 	// Broadcast block break effect (particles/sound) to other players
 	s.broadcastBlockBreakEffect(player, x, y, z, blockState)
+
+	// In creative mode, don't give items on break
+	if player.GameMode == GameModeCreative {
+		log.Printf("Player %s broke block %d at (%d, %d, %d) (creative)", player.Username, blockID, x, y, z)
+		return
+	}
 
 	// Give item to player
 	itemID := world.BlockToItemID(blockState)
@@ -863,4 +1058,153 @@ func offlineUUID(username string) [16]byte {
 func formatUUID(uuid [16]byte) string {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
+}
+
+// sendPlayerAbilities sends the Player Abilities packet (0x39) based on the player's current gamemode.
+func (s *Server) sendPlayerAbilities(player *Player) {
+	var flags byte
+	switch player.GameMode {
+	case GameModeCreative:
+		flags = 0x0D // Invulnerable (0x01) | Allow Flying (0x04) | Instant Break (0x08)
+	case GameModeSpectator:
+		flags = 0x07 // Invulnerable (0x01) | Flying (0x02) | Allow Flying (0x04)
+	default:
+		flags = 0x00
+	}
+	abilities := protocol.MarshalPacket(0x39, func(w *bytes.Buffer) {
+		protocol.WriteByte(w, flags)
+		protocol.WriteFloat32(w, 0.05) // Flying speed
+		protocol.WriteFloat32(w, 0.1)  // Walking speed (FOV modifier)
+	})
+	player.mu.Lock()
+	protocol.WritePacket(player.Conn, abilities)
+	player.mu.Unlock()
+}
+
+// sendChatToPlayer sends a chat message to a single player.
+func (s *Server) sendChatToPlayer(player *Player, msg chat.Message) {
+	jsonMsg := msg.String()
+	pkt := protocol.MarshalPacket(0x02, func(w *bytes.Buffer) {
+		protocol.WriteString(w, jsonMsg)
+		protocol.WriteByte(w, 0) // Position: chat
+	})
+	player.mu.Lock()
+	protocol.WritePacket(player.Conn, pkt)
+	player.mu.Unlock()
+}
+
+// handleCommand dispatches a /-prefixed command from a player.
+func (s *Server) handleCommand(player *Player, message string) {
+	parts := strings.Fields(message)
+	if len(parts) == 0 {
+		return
+	}
+	cmd := strings.ToLower(parts[0])
+	log.Printf("Player %s issued command: %s", player.Username, message)
+
+	switch cmd {
+	case "/gamemode", "/gm":
+		s.handleGamemodeCommand(player, parts[1:])
+	default:
+		s.sendChatToPlayer(player, chat.Colored("Unknown command: "+cmd, "red"))
+	}
+}
+
+// handleGamemodeCommand handles the /gamemode command.
+// Usage: /gamemode <survival|creative|adventure|spectator|0|1|2|3>
+func (s *Server) handleGamemodeCommand(player *Player, args []string) {
+	if len(args) < 1 {
+		s.sendChatToPlayer(player, chat.Colored("Usage: /gamemode <survival|creative|adventure|spectator|0|1|2|3>", "red"))
+		return
+	}
+
+	var mode byte
+	switch strings.ToLower(args[0]) {
+	case "survival", "s", "0":
+		mode = GameModeSurvival
+	case "creative", "c", "1":
+		mode = GameModeCreative
+	case "adventure", "a", "2":
+		mode = GameModeAdventure
+	case "spectator", "sp", "3":
+		mode = GameModeSpectator
+	default:
+		s.sendChatToPlayer(player, chat.Colored("Unknown gamemode: "+args[0], "red"))
+		return
+	}
+
+	player.mu.Lock()
+	player.GameMode = mode
+	player.mu.Unlock()
+
+	// Send Change Game State packet (reason=3 = change game mode)
+	changeGameState := protocol.MarshalPacket(0x2B, func(w *bytes.Buffer) {
+		protocol.WriteByte(w, 3)                    // Reason: change game mode
+		protocol.WriteFloat32(w, float32(mode))     // Value: new game mode
+	})
+	player.mu.Lock()
+	protocol.WritePacket(player.Conn, changeGameState)
+	player.mu.Unlock()
+
+	// Send updated abilities
+	s.sendPlayerAbilities(player)
+
+	// Feedback
+	modeName := GameModeName(mode)
+	s.sendChatToPlayer(player, chat.Colored("Game mode set to "+modeName, "gray"))
+	log.Printf("Player %s game mode changed to %s", player.Username, modeName)
+}
+
+// GameModeName returns the display name for a gamemode.
+func GameModeName(mode byte) string {
+	switch mode {
+	case GameModeSurvival:
+		return "Survival"
+	case GameModeCreative:
+		return "Creative"
+	case GameModeAdventure:
+		return "Adventure"
+	case GameModeSpectator:
+		return "Spectator"
+	default:
+		return fmt.Sprintf("Unknown(%d)", mode)
+	}
+}
+
+// faceOffset returns the target block position when placing against a face.
+// Face values: 0=bottom, 1=top, 2=north(-Z), 3=south(+Z), 4=west(-X), 5=east(+X)
+func faceOffset(x, y, z int32, face byte) (int32, int32, int32) {
+	switch face {
+	case 0:
+		return x, y - 1, z
+	case 1:
+		return x, y + 1, z
+	case 2:
+		return x, y, z - 1
+	case 3:
+		return x, y, z + 1
+	case 4:
+		return x - 1, y, z
+	case 5:
+		return x + 1, y, z
+	default:
+		return x, y + 1, z
+	}
+}
+
+// ParseGameMode parses a gamemode string into its byte value.
+// Returns the mode and true on success, or 0 and false on failure.
+func ParseGameMode(s string) (byte, bool) {
+	switch strings.ToLower(s) {
+	case "survival", "s", "0":
+		return GameModeSurvival, true
+	case "creative", "c", "1":
+		return GameModeCreative, true
+	case "adventure", "a", "2":
+		return GameModeAdventure, true
+	case "spectator", "sp", "3":
+		return GameModeSpectator, true
+	default:
+		return 0, false
+	}
 }
