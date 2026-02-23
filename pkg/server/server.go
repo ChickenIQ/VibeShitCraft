@@ -39,20 +39,29 @@ type Server struct {
 	mu       sync.RWMutex
 	nextEID  int32
 	stopCh   chan struct{}
+	world    *world.World
+}
+
+// Slot represents an inventory slot.
+type Slot struct {
+	ItemID int16
+	Count  byte
+	Damage int16
 }
 
 // Player represents a connected player.
 type Player struct {
-	EntityID int32
-	Username string
-	UUID     [16]byte
-	Conn     net.Conn
-	State    int
-	X, Y, Z float64
-	Yaw      float32
-	Pitch    float32
-	OnGround bool
-	mu       sync.Mutex
+	EntityID  int32
+	Username  string
+	UUID      [16]byte
+	Conn      net.Conn
+	State     int
+	X, Y, Z   float64
+	Yaw       float32
+	Pitch     float32
+	OnGround  bool
+	Inventory [45]Slot
+	mu        sync.Mutex
 }
 
 // New creates a new server with the given configuration.
@@ -62,6 +71,7 @@ func New(config Config) *Server {
 		players: make(map[int32]*Player),
 		nextEID: 1,
 		stopCh:  make(chan struct{}),
+		world:   world.NewWorld(),
 	}
 }
 
@@ -252,6 +262,11 @@ func (s *Server) handleLoginStart(conn net.Conn, pkt *protocol.Packet) (*Player,
 		OnGround: true,
 	}
 
+	// Initialize all inventory slots as empty
+	for i := range player.Inventory {
+		player.Inventory[i].ItemID = -1
+	}
+
 	// Send Login Success
 	loginSuccess := protocol.MarshalPacket(0x02, func(w *bytes.Buffer) {
 		protocol.WriteString(w, formatUUID(uuid))
@@ -306,6 +321,9 @@ func (s *Server) handlePlay(player *Player) {
 
 	// Send chunks around spawn
 	s.sendSpawnChunks(conn)
+
+	// Send any block modifications to the new player
+	s.sendBlockModifications(conn)
 
 	// Register player
 	s.mu.Lock()
@@ -424,6 +442,14 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 	case 0x09: // Held Item Change
 		// Ignore for now
 
+	case 0x07: // Player Digging
+		status, _ := protocol.ReadByte(r)
+		x, y, z, _ := protocol.ReadPosition(r)
+		_, _ = protocol.ReadByte(r) // face
+		if status == 2 { // Finished digging
+			s.handleBlockBreak(player, x, y, z)
+		}
+
 	case 0x0A: // Animation
 		// Broadcast arm swing to other players
 		s.broadcastAnimation(player, 0)
@@ -478,6 +504,17 @@ func (s *Server) sendSpawnChunks(conn net.Conn) {
 			})
 			protocol.WritePacket(conn, pkt)
 		}
+	}
+}
+
+func (s *Server) sendBlockModifications(conn net.Conn) {
+	modifications := s.world.GetModifications()
+	for pos, blockState := range modifications {
+		pkt := protocol.MarshalPacket(0x23, func(w *bytes.Buffer) {
+			protocol.WritePosition(w, pos.X, pos.Y, pos.Z)
+			protocol.WriteVarInt(w, int32(blockState))
+		})
+		protocol.WritePacket(conn, pkt)
 	}
 }
 
@@ -657,6 +694,122 @@ func (s *Server) broadcastDestroyEntity(entityID int32) {
 		protocol.WritePacket(p.Conn, pkt)
 		p.mu.Unlock()
 	}
+}
+
+func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
+	blockState := s.world.GetBlock(x, y, z)
+	blockID := blockState >> 4
+
+	// Don't break air or bedrock
+	if blockID == 0 || blockID == 7 {
+		return
+	}
+
+	// Set block to air in world state
+	s.world.SetBlock(x, y, z, 0)
+
+	// Broadcast block change (air) to all players
+	s.broadcastBlockChange(x, y, z, 0)
+
+	// Broadcast block break effect (particles/sound) to other players
+	s.broadcastBlockBreakEffect(player, x, y, z, blockState)
+
+	// Give item to player
+	itemID := world.BlockToItemID(blockState)
+	if itemID < 0 {
+		return
+	}
+
+	player.mu.Lock()
+	slotIndex, ok := addItemToInventory(player, itemID, 1)
+	if ok {
+		slot := player.Inventory[slotIndex]
+		pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+			protocol.WriteByte(w, 0) // Window ID 0 = player inventory
+			protocol.WriteInt16(w, int16(slotIndex))
+			protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+		})
+		protocol.WritePacket(player.Conn, pkt)
+	}
+	player.mu.Unlock()
+
+	if ok {
+		log.Printf("Player %s broke block %d at (%d, %d, %d), received item %d", player.Username, blockID, x, y, z, itemID)
+	}
+}
+
+func (s *Server) broadcastBlockChange(x, y, z int32, blockState uint16) {
+	pkt := protocol.MarshalPacket(0x23, func(w *bytes.Buffer) {
+		protocol.WritePosition(w, x, y, z)
+		protocol.WriteVarInt(w, int32(blockState))
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		p.mu.Lock()
+		protocol.WritePacket(p.Conn, pkt)
+		p.mu.Unlock()
+	}
+}
+
+func (s *Server) broadcastBlockBreakEffect(breaker *Player, x, y, z int32, blockState uint16) {
+	blockID := blockState >> 4
+	metadata := blockState & 0x0F
+	effectData := int32(blockID) | (int32(metadata) << 12)
+
+	pkt := protocol.MarshalPacket(0x28, func(w *bytes.Buffer) {
+		protocol.WriteInt32(w, 2001) // Effect ID: block break
+		protocol.WritePosition(w, x, y, z)
+		protocol.WriteInt32(w, effectData)
+		protocol.WriteBool(w, false) // Disable relative volume
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		if p.EntityID == breaker.EntityID {
+			continue // Breaking player already sees the effect client-side
+		}
+		p.mu.Lock()
+		protocol.WritePacket(p.Conn, pkt)
+		p.mu.Unlock()
+	}
+}
+
+// addItemToInventory finds a suitable slot and adds the item to the player's inventory.
+// Returns the slot index and true if successful, or -1 and false if inventory is full.
+// Must be called with player.mu held.
+func addItemToInventory(player *Player, itemID int16, count byte) (int, bool) {
+	// Try to stack in hotbar (slots 36-44)
+	for i := 36; i <= 44; i++ {
+		if player.Inventory[i].ItemID == itemID && player.Inventory[i].Count < 64 {
+			player.Inventory[i].Count += count
+			return i, true
+		}
+	}
+	// Try to stack in main inventory (slots 9-35)
+	for i := 9; i <= 35; i++ {
+		if player.Inventory[i].ItemID == itemID && player.Inventory[i].Count < 64 {
+			player.Inventory[i].Count += count
+			return i, true
+		}
+	}
+	// Try empty slot in hotbar
+	for i := 36; i <= 44; i++ {
+		if player.Inventory[i].ItemID == -1 {
+			player.Inventory[i] = Slot{ItemID: itemID, Count: count}
+			return i, true
+		}
+	}
+	// Try empty slot in main inventory
+	for i := 9; i <= 35; i++ {
+		if player.Inventory[i].ItemID == -1 {
+			player.Inventory[i] = Slot{ItemID: itemID, Count: count}
+			return i, true
+		}
+	}
+	return -1, false
 }
 
 func (s *Server) playerCount() int {

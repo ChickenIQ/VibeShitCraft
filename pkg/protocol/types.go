@@ -297,3 +297,23 @@ func WritePosition(w io.Writer, x, y, z int32) error {
 	val := (int64(x&0x3FFFFFF) << 38) | (int64(y&0xFFF) << 26) | int64(z&0x3FFFFFF)
 	return WriteInt64(w, val)
 }
+
+// WriteSlotData writes Minecraft slot data for an inventory slot.
+// Pass itemID=-1 for an empty slot.
+func WriteSlotData(w io.Writer, itemID int16, count byte, damage int16) error {
+	if err := WriteInt16(w, itemID); err != nil {
+		return err
+	}
+	if itemID == -1 {
+		return nil
+	}
+	if err := WriteByte(w, count); err != nil {
+		return err
+	}
+	if err := WriteInt16(w, damage); err != nil {
+		return err
+	}
+	// No NBT data
+	_, err := w.Write([]byte{0x00})
+	return err
+}

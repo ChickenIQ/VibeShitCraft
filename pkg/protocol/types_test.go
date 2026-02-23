@@ -245,3 +245,29 @@ func TestVarLong(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteSlotDataEmpty(t *testing.T) {
+	var buf bytes.Buffer
+	err := WriteSlotData(&buf, -1, 0, 0)
+	if err != nil {
+		t.Fatalf("WriteSlotData error: %v", err)
+	}
+	// Empty slot: just 2 bytes for itemID = -1 (0xFF 0xFF big-endian)
+	expected := []byte{0xFF, 0xFF}
+	if !bytes.Equal(buf.Bytes(), expected) {
+		t.Errorf("WriteSlotData empty = %v, want %v", buf.Bytes(), expected)
+	}
+}
+
+func TestWriteSlotDataWithItem(t *testing.T) {
+	var buf bytes.Buffer
+	err := WriteSlotData(&buf, 3, 1, 0)
+	if err != nil {
+		t.Fatalf("WriteSlotData error: %v", err)
+	}
+	// Item ID 3 (2 bytes big-endian), count 1 (1 byte), damage 0 (2 bytes big-endian), no NBT (1 byte 0x00)
+	expected := []byte{0x00, 0x03, 0x01, 0x00, 0x00, 0x00}
+	if !bytes.Equal(buf.Bytes(), expected) {
+		t.Errorf("WriteSlotData = %v, want %v", buf.Bytes(), expected)
+	}
+}
