@@ -783,14 +783,14 @@ func (s *Server) broadcastBlockBreakEffect(breaker *Player, x, y, z int32, block
 func addItemToInventory(player *Player, itemID int16, count byte) (int, bool) {
 	// Try to stack in hotbar (slots 36-44)
 	for i := 36; i <= 44; i++ {
-		if player.Inventory[i].ItemID == itemID && player.Inventory[i].Count < 64 {
+		if player.Inventory[i].ItemID == itemID && player.Inventory[i].Count+count <= 64 {
 			player.Inventory[i].Count += count
 			return i, true
 		}
 	}
 	// Try to stack in main inventory (slots 9-35)
 	for i := 9; i <= 35; i++ {
-		if player.Inventory[i].ItemID == itemID && player.Inventory[i].Count < 64 {
+		if player.Inventory[i].ItemID == itemID && player.Inventory[i].Count+count <= 64 {
 			player.Inventory[i].Count += count
 			return i, true
 		}
