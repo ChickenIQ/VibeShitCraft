@@ -150,7 +150,7 @@ func TestFindRecipe3x3Furnace(t *testing.T) {
 	// Furnace: ring of cobblestone in 3x3
 	grid := []Slot{
 		{ItemID: 4, Count: 1, Damage: 0}, {ItemID: 4, Count: 1, Damage: 0}, {ItemID: 4, Count: 1, Damage: 0},
-		{ItemID: 4, Count: 1, Damage: 0}, {ItemID: -1},                      {ItemID: 4, Count: 1, Damage: 0},
+		{ItemID: 4, Count: 1, Damage: 0}, {ItemID: -1}, {ItemID: 4, Count: 1, Damage: 0},
 		{ItemID: 4, Count: 1, Damage: 0}, {ItemID: 4, Count: 1, Damage: 0}, {ItemID: 4, Count: 1, Damage: 0},
 	}
 	r := findRecipe(grid, 3)
@@ -165,8 +165,8 @@ func TestFindRecipe3x3Furnace(t *testing.T) {
 func TestFindRecipe3x3WoodenPickaxe(t *testing.T) {
 	grid := []Slot{
 		{ItemID: 5, Count: 1, Damage: 0}, {ItemID: 5, Count: 1, Damage: 0}, {ItemID: 5, Count: 1, Damage: 0},
-		{ItemID: -1},                      {ItemID: 280, Count: 1, Damage: 0}, {ItemID: -1},
-		{ItemID: -1},                      {ItemID: 280, Count: 1, Damage: 0}, {ItemID: -1},
+		{ItemID: -1}, {ItemID: 280, Count: 1, Damage: 0}, {ItemID: -1},
+		{ItemID: -1}, {ItemID: 280, Count: 1, Damage: 0}, {ItemID: -1},
 	}
 	r := findRecipe(grid, 3)
 	if r == nil {
@@ -182,7 +182,7 @@ func TestFindRecipe3x3Torch(t *testing.T) {
 	grid := []Slot{
 		{ItemID: -1}, {ItemID: 263, Count: 1, Damage: 0}, {ItemID: -1},
 		{ItemID: -1}, {ItemID: 280, Count: 1, Damage: 0}, {ItemID: -1},
-		{ItemID: -1}, {ItemID: -1},                        {ItemID: -1},
+		{ItemID: -1}, {ItemID: -1}, {ItemID: -1},
 	}
 	r := findRecipe(grid, 3)
 	if r == nil {
@@ -198,7 +198,7 @@ func TestFindRecipe2x2RecipeIn3x3Grid(t *testing.T) {
 	grid := []Slot{
 		{ItemID: 5, Count: 1, Damage: 0}, {ItemID: 5, Count: 1, Damage: 0}, {ItemID: -1},
 		{ItemID: 5, Count: 1, Damage: 0}, {ItemID: 5, Count: 1, Damage: 0}, {ItemID: -1},
-		{ItemID: -1},                      {ItemID: -1},                      {ItemID: -1},
+		{ItemID: -1}, {ItemID: -1}, {ItemID: -1},
 	}
 	r := findRecipe(grid, 3)
 	if r == nil {
@@ -316,7 +316,7 @@ func TestFindRecipeWoodenAxeLeft(t *testing.T) {
 	grid := []Slot{
 		{ItemID: 5, Count: 1, Damage: 0}, {ItemID: 5, Count: 1, Damage: 0}, {ItemID: -1},
 		{ItemID: 5, Count: 1, Damage: 0}, {ItemID: 280, Count: 1, Damage: 0}, {ItemID: -1},
-		{ItemID: -1},                      {ItemID: 280, Count: 1, Damage: 0}, {ItemID: -1},
+		{ItemID: -1}, {ItemID: 280, Count: 1, Damage: 0}, {ItemID: -1},
 	}
 	r := findRecipe(grid, 3)
 	if r == nil {

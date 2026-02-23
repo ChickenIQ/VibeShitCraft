@@ -243,13 +243,13 @@ func TestYawToDirection(t *testing.T) {
 		yaw  float32
 		want int
 	}{
-		{0, 0},      // south
-		{90, 1},     // west
-		{180, 2},    // north
-		{270, 3},    // east
-		{360, 0},    // south (wrap)
-		{-90, 3},    // east
-		{-180, 2},   // north
+		{0, 0},    // south
+		{90, 1},   // west
+		{180, 2},  // north
+		{270, 3},  // east
+		{360, 0},  // south (wrap)
+		{-90, 3},  // east
+		{-180, 2}, // north
 	}
 	for _, tt := range tests {
 		got := yawToDirection(tt.yaw)
@@ -268,13 +268,13 @@ func TestBlockPlacementMeta_Stairs(t *testing.T) {
 		cursorY byte
 		want    byte
 	}{
-		{"south-bottom", 0, 1, 0, 2},    // looking south, place on top face → meta 2
-		{"west-bottom", 90, 1, 0, 1},    // looking west → meta 1
-		{"north-bottom", 180, 1, 0, 3},  // looking north → meta 3
-		{"east-bottom", 270, 1, 0, 0},   // looking east → meta 0
-		{"south-upsidedown-bottom-face", 0, 0, 0, 6},   // face=0 (bottom) → upside-down: 2|4=6
-		{"south-upsidedown-side-upper", 0, 2, 10, 6},    // side face, cursorY>=8 → upside-down: 2|4=6
-		{"south-rightside-side-lower", 0, 2, 3, 2},      // side face, cursorY<8 → normal: 2
+		{"south-bottom", 0, 1, 0, 2},                 // looking south, place on top face → meta 2
+		{"west-bottom", 90, 1, 0, 1},                 // looking west → meta 1
+		{"north-bottom", 180, 1, 0, 3},               // looking north → meta 3
+		{"east-bottom", 270, 1, 0, 0},                // looking east → meta 0
+		{"south-upsidedown-bottom-face", 0, 0, 0, 6}, // face=0 (bottom) → upside-down: 2|4=6
+		{"south-upsidedown-side-upper", 0, 2, 10, 6}, // side face, cursorY>=8 → upside-down: 2|4=6
+		{"south-rightside-side-lower", 0, 2, 3, 2},   // side face, cursorY<8 → normal: 2
 	}
 	for _, tt := range tests {
 		got := blockPlacementMeta(53, 0, tt.face, 8, tt.cursorY, tt.yaw)
