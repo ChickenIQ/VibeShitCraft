@@ -39,8 +39,8 @@ jobs:
       - name: Build Linux MIPSBE
         run: GOOS=linux GOARCH=mips go build -o vibeshitcraft-linux-mipsbe ./cmd/server/
 
-      - name: Build Linux ppc64 (PS3 / Cell PPE - PowerPC ISA 2.02 big-endian; GOPPC64=power5 is the lowest Go 1.21 supports)
-        run: GOOS=linux GOARCH=ppc64 GOPPC64=power5 go build -o vibeshitcraft-linux-ppc64 ./cmd/server/
+      - name: Build Linux ppc64
+        run: GOOS=linux GOARCH=ppc64 GOPPC64=power8 go build -o vibeshitcraft-linux-ppc64 ./cmd/server/
 
       - name: Build Linux ppc64le
         run: GOOS=linux GOARCH=ppc64le go build -o vibeshitcraft-linux-ppc64le ./cmd/server/
