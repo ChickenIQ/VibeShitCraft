@@ -250,35 +250,12 @@ func TestYawToDirection(t *testing.T) {
 		{360, 0},    // south (wrap)
 		{-90, 3},    // east
 		{-180, 2},   // north
-		{45, 0},     // boundary → south
-		{46, 1},     // just past boundary → west
-		{135, 2},    // boundary → north
-		{225, 2},    // boundary → north (225 * 4/360 + 0.5 = 3.0 → &3 = 3?) let me recalc
 	}
-	// Recalculate expectations inline to match the formula
 	for _, tt := range tests {
 		got := yawToDirection(tt.yaw)
-		_ = got // Just verify no panic
-	}
-
-	// Verify the four cardinal directions explicitly
-	if d := yawToDirection(0); d != 0 {
-		t.Errorf("yaw=0 → %d, want 0 (south)", d)
-	}
-	if d := yawToDirection(90); d != 1 {
-		t.Errorf("yaw=90 → %d, want 1 (west)", d)
-	}
-	if d := yawToDirection(180); d != 2 {
-		t.Errorf("yaw=180 → %d, want 2 (north)", d)
-	}
-	if d := yawToDirection(270); d != 3 {
-		t.Errorf("yaw=270 → %d, want 3 (east)", d)
-	}
-	if d := yawToDirection(-90); d != 3 {
-		t.Errorf("yaw=-90 → %d, want 3 (east)", d)
-	}
-	if d := yawToDirection(360); d != 0 {
-		t.Errorf("yaw=360 → %d, want 0 (south)", d)
+		if got != tt.want {
+			t.Errorf("yawToDirection(%v) = %d, want %d", tt.yaw, got, tt.want)
+		}
 	}
 }
 

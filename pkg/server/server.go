@@ -844,7 +844,7 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		// Cursor position (3 bytes)
 		cursorX, _ := protocol.ReadByte(r)
 		cursorY, _ := protocol.ReadByte(r)
-		_, _ = protocol.ReadByte(r) // cursorZ — unused
+		_, _ = protocol.ReadByte(r) // cursorZ - unused
 
 		if player.GameMode == GameModeSpectator {
 			player.mu.Lock()
