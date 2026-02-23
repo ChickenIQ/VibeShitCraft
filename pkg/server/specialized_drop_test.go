@@ -1,7 +1,6 @@
 package server
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/StoreStation/VibeShitCraft/pkg/world"
@@ -257,6 +256,4 @@ func TestDefaultDropsBaseDamage(t *testing.T) {
 	if itemID != 42 || damage != 0 || count != 1 {
 		t.Errorf("Iron block with metadata: got (%d, %d, %d), want (42, 0, 1)", itemID, damage, count)
 	}
-
-	_ = fmt.Sprintf("") // use fmt
 }
