@@ -628,10 +628,10 @@ func (s *Server) handlePlay(player *Player) {
 		protocol.WriteVarInt(w, 1) // Number of players
 		protocol.WriteUUID(w, player.UUID)
 		protocol.WriteString(w, player.Username)
-		protocol.WriteVarInt(w, 0)                       // Number of properties
-		protocol.WriteVarInt(w, int32(player.GameMode))  // Gamemode
-		protocol.WriteVarInt(w, 0)                       // Ping
-		protocol.WriteBool(w, false)                     // Has display name
+		protocol.WriteVarInt(w, 0)                      // Number of properties
+		protocol.WriteVarInt(w, int32(player.GameMode)) // Gamemode
+		protocol.WriteVarInt(w, 0)                      // Ping
+		protocol.WriteBool(w, false)                    // Has display name
 	})
 	player.mu.Lock()
 	protocol.WritePacket(player.Conn, selfListAdd)
@@ -1008,6 +1008,7 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		clickedBlockState := s.world.GetBlock(x, y, z)
 		clickedBlockID := clickedBlockState >> 4
 		if clickedBlockID == 58 { // Crafting Table
+			// ... existing crafting table logic ...
 			player.mu.Lock()
 			player.OpenWindowID = 1
 			for i := range player.CraftTableGrid {
@@ -1025,6 +1026,68 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			}
 			player.mu.Unlock()
 			return
+		}
+
+		// Handle door right-click interaction (open/close)
+		// Doors: 64, 71, 193-197
+		if clickedBlockID == 64 || clickedBlockID == 71 || (clickedBlockID >= 193 && clickedBlockID <= 197) {
+			metadata := int16(clickedBlockState & 0x0F)
+			var otherY int32
+			var otherState uint16
+			var upperMetadata int16
+			var lowerMetadata int16
+
+			if metadata&0x08 != 0 {
+				// Upper half clicked
+				otherY = y - 1
+				otherState = s.world.GetBlock(x, otherY, z)
+				lowerMetadata = int16(otherState & 0x0F)
+				upperMetadata = metadata
+			} else {
+				// Lower half clicked
+				otherY = y + 1
+				otherState = s.world.GetBlock(x, otherY, z)
+				upperMetadata = int16(otherState & 0x0F)
+				lowerMetadata = metadata
+			}
+
+			// Toggle the open bit (0x04) on the lower half
+			newLowerMetadata := lowerMetadata ^ 0x04
+			newLowerState := (clickedBlockID << 4) | uint16(newLowerMetadata)
+			newUpperState := (clickedBlockID << 4) | uint16(upperMetadata) // Upper half metadata remains same
+
+			if metadata&0x08 != 0 {
+				// Clicked upper half
+				s.world.SetBlock(x, y, z, newUpperState)
+				s.broadcastBlockChange(x, y, z, newUpperState)
+				s.world.SetBlock(x, otherY, z, newLowerState)
+				s.broadcastBlockChange(x, otherY, z, newLowerState)
+			} else {
+				// Clicked lower half
+				s.world.SetBlock(x, y, z, newLowerState)
+				s.broadcastBlockChange(x, y, z, newLowerState)
+				s.world.SetBlock(x, otherY, z, newUpperState)
+				s.broadcastBlockChange(x, otherY, z, newUpperState)
+			}
+
+			// Send sound effect for door
+			soundPkt := protocol.MarshalPacket(0x28, func(w *bytes.Buffer) {
+				protocol.WriteInt32(w, 1003) // Effect ID: open/close door
+				protocol.WritePosition(w, x, y, z)
+				protocol.WriteInt32(w, 0)
+				protocol.WriteBool(w, false)
+			})
+			s.mu.RLock()
+			for _, p := range s.players {
+				p.mu.Lock()
+				if p.Conn != nil {
+					protocol.WritePacket(p.Conn, soundPkt)
+				}
+				p.mu.Unlock()
+			}
+			s.mu.RUnlock()
+
+			return // Don't place a block!
 		}
 
 		// Handle spawn egg right-click on a block
