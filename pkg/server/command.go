@@ -6,6 +6,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/StoreStation/VibeShitCraft/pkg/chat"
 	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
@@ -25,6 +26,8 @@ func (s *Server) handleCommand(player *Player, message string) {
 		s.handleGamemodeCommand(player, parts[1:])
 	case "/tp", "/teleport":
 		s.handleTpCommand(player, parts[1:])
+	case "/stop":
+		s.handleStopCommand(player)
 	default:
 		s.sendChatToPlayer(player, chat.Colored("Unknown command: "+cmd, "red"))
 	}
@@ -154,4 +157,17 @@ func (s *Server) teleportPlayer(player *Player, x, y, z float64) {
 
 	// Load/unload chunks around new position
 	s.sendChunkUpdates(player)
+}
+
+// handleStopCommand handles the /stop command.
+func (s *Server) handleStopCommand(player *Player) {
+	log.Printf("Player %s issued /stop command, shutting down server...", player.Username)
+	s.broadcastChat(chat.Colored("Server is stopping...", "red"))
+
+	// Give a small delay for the message to propagate if needed,
+	// though Stop() closes connections which is more immediate.
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		s.Stop()
+	}()
 }
