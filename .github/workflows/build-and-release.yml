@@ -21,8 +21,14 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build
-        run: go build -o vibeshitcraft ./cmd/server/
+      - name: Build Linux
+        run: GOOS=linux GOARCH=amd64 go build -o vibeshitcraft-linux-amd64 ./cmd/server/
+
+      - name: Build Windows
+        run: GOOS=windows GOARCH=amd64 go build -o vibeshitcraft-windows-amd64.exe ./cmd/server/
+
+      - name: Build macOS
+        run: GOOS=darwin GOARCH=amd64 go build -o vibeshitcraft-darwin-amd64 ./cmd/server/
 
       - name: Compute padded run number
         id: padded
@@ -34,5 +40,8 @@ jobs:
           tag_name: build-${{ steps.padded.outputs.run_number }}
           name: Build ${{ github.run_number }} from ${{ github.ref_name }}
           body: "Built from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})"
-          files: vibeshitcraft
+          files: |
+            vibeshitcraft-linux-amd64
+            vibeshitcraft-windows-amd64.exe
+            vibeshitcraft-darwin-amd64
           make_latest: true
