@@ -271,3 +271,203 @@ func TestPlayerDefaultGameMode(t *testing.T) {
 		t.Errorf("DefaultGameMode = %d, want %d", srv.config.DefaultGameMode, GameModeCreative)
 	}
 }
+
+func TestIsValidSpawnEggType(t *testing.T) {
+	// Valid mob types
+	validTypes := []byte{50, 51, 52, 54, 55, 56, 57, 58, 59, 60, 61, 62,
+		65, 66, 67, 68,
+		90, 91, 92, 93, 94, 95, 96, 98, 100, 101, 120}
+	for _, typeID := range validTypes {
+		if !IsValidSpawnEggType(typeID) {
+			t.Errorf("IsValidSpawnEggType(%d) = false, want true", typeID)
+		}
+	}
+
+	// Invalid types
+	invalidTypes := []byte{0, 1, 49, 53, 63, 64, 69, 89, 99, 102, 255}
+	for _, typeID := range invalidTypes {
+		if IsValidSpawnEggType(typeID) {
+			t.Errorf("IsValidSpawnEggType(%d) = true, want false", typeID)
+		}
+	}
+}
+
+func TestSpawnEggItemID(t *testing.T) {
+	if SpawnEggItemID != 383 {
+		t.Errorf("SpawnEggItemID = %d, want 383", SpawnEggItemID)
+	}
+}
+
+func TestServerMobsMapInitialized(t *testing.T) {
+	srv := New(DefaultConfig())
+	if srv.mobs == nil {
+		t.Fatal("mobs map is nil after New()")
+	}
+	if len(srv.mobs) != 0 {
+		t.Errorf("mobs map should be empty, got %d entries", len(srv.mobs))
+	}
+}
+
+func TestSpawnMob(t *testing.T) {
+	config := Config{
+		Address:    "127.0.0.1:0",
+		MaxPlayers: 10,
+		MOTD:       "Test",
+	}
+	srv := New(config)
+
+	srv.SpawnMob(10.5, 65.0, 20.5, 0, 0, 90) // Pig
+
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+
+	if len(srv.mobs) != 1 {
+		t.Fatalf("expected 1 mob, got %d", len(srv.mobs))
+	}
+
+	for _, mob := range srv.mobs {
+		if mob.TypeID != 90 {
+			t.Errorf("mob TypeID = %d, want 90", mob.TypeID)
+		}
+		if mob.X != 10.5 || mob.Y != 65.0 || mob.Z != 20.5 {
+			t.Errorf("mob position = (%f, %f, %f), want (10.5, 65.0, 20.5)", mob.X, mob.Y, mob.Z)
+		}
+	}
+}
+
+func TestSpawnItemEntityTracking(t *testing.T) {
+	config := Config{
+		Address:    "127.0.0.1:0",
+		MaxPlayers: 10,
+		MOTD:       "Test",
+	}
+	srv := New(config)
+
+	srv.SpawnItem(5.5, 10.0, 15.5, 0.1, 0.2, -0.1, 4, 0, 1) // Cobblestone
+
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+
+	if len(srv.entities) != 1 {
+		t.Fatalf("expected 1 item entity, got %d", len(srv.entities))
+	}
+
+	for _, item := range srv.entities {
+		if item.ItemID != 4 {
+			t.Errorf("item ItemID = %d, want 4", item.ItemID)
+		}
+		if item.X != 5.5 || item.Y != 10.0 || item.Z != 15.5 {
+			t.Errorf("item position = (%f, %f, %f), want (5.5, 10.0, 15.5)", item.X, item.Y, item.Z)
+		}
+		if item.VX != 0.1 || item.VY != 0.2 || item.VZ != -0.1 {
+			t.Errorf("item velocity = (%f, %f, %f), want (0.1, 0.2, -0.1)", item.VX, item.VY, item.VZ)
+		}
+	}
+}
+
+func TestEntityGravityItemFalls(t *testing.T) {
+	srv := New(Config{Address: "127.0.0.1:0", MaxPlayers: 10, MOTD: "Test"})
+
+	// Spawn item high in the air with no velocity
+	srv.SpawnItem(8.5, 100.0, 8.5, 0, 0, 0, 4, 0, 1)
+
+	srv.mu.RLock()
+	var item *ItemEntity
+	for _, e := range srv.entities {
+		item = e
+	}
+	srv.mu.RUnlock()
+
+	startY := item.Y
+
+	// Run a few physics ticks
+	for i := 0; i < 5; i++ {
+		srv.tickEntityPhysics()
+	}
+
+	srv.mu.RLock()
+	endY := item.Y
+	srv.mu.RUnlock()
+
+	if endY >= startY {
+		t.Errorf("item should have fallen: startY=%f, endY=%f", startY, endY)
+	}
+}
+
+func TestEntityGravityMobFalls(t *testing.T) {
+	srv := New(Config{Address: "127.0.0.1:0", MaxPlayers: 10, MOTD: "Test"})
+
+	// Spawn mob high in the air
+	srv.SpawnMob(8.5, 100.0, 8.5, 0, 0, 90)
+
+	srv.mu.RLock()
+	var mob *MobEntity
+	for _, m := range srv.mobs {
+		mob = m
+	}
+	srv.mu.RUnlock()
+
+	startY := mob.Y
+
+	for i := 0; i < 5; i++ {
+		srv.tickEntityPhysics()
+	}
+
+	srv.mu.RLock()
+	endY := mob.Y
+	srv.mu.RUnlock()
+
+	if endY >= startY {
+		t.Errorf("mob should have fallen: startY=%f, endY=%f", startY, endY)
+	}
+}
+
+func TestEntityGravityStopsOnGround(t *testing.T) {
+	srv := New(Config{Address: "127.0.0.1:0", MaxPlayers: 10, MOTD: "Test", Seed: 12345})
+
+	// Find the surface height at (8, 8) and spawn item just above it
+	surfaceY := float64(srv.world.Gen.SurfaceHeight(8, 8)) + 2.0
+	srv.SpawnItem(8.5, surfaceY, 8.5, 0, 0, 0, 4, 0, 1)
+
+	// Run many ticks to let it settle
+	for i := 0; i < 100; i++ {
+		srv.tickEntityPhysics()
+	}
+
+	srv.mu.RLock()
+	var item *ItemEntity
+	for _, e := range srv.entities {
+		item = e
+	}
+	vy := item.VY
+	y := item.Y
+	srv.mu.RUnlock()
+
+	// Item should have settled - velocity should be zero and Y should be above 0
+	if vy != 0 {
+		t.Errorf("item VY should be 0 after settling, got %f", vy)
+	}
+	if y <= 0 {
+		t.Errorf("item Y should be above 0, got %f", y)
+	}
+}
+
+func TestEntityGravityDoesNotAffectPlayers(t *testing.T) {
+	srv := New(Config{Address: "127.0.0.1:0", MaxPlayers: 10, MOTD: "Test"})
+
+	// tickEntityPhysics only affects entities and mobs, not players
+	// Just verify that the function runs without error and no player map entries are modified
+	srv.mu.Lock()
+	srv.players[1] = &Player{EntityID: 1, X: 8.5, Y: 100.0, Z: 8.5}
+	srv.mu.Unlock()
+
+	srv.tickEntityPhysics()
+
+	srv.mu.RLock()
+	p := srv.players[1]
+	srv.mu.RUnlock()
+
+	if p.Y != 100.0 {
+		t.Errorf("player Y should not change, got %f", p.Y)
+	}
+}
