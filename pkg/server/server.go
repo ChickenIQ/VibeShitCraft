@@ -8,6 +8,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -60,11 +61,16 @@ type Server struct {
 	listener net.Listener
 	players  map[int32]*Player
 	entities map[int32]*ItemEntity
-	mobs     map[int32]*MobEntity
 	mu       sync.RWMutex
 	nextEID  int32
 	stopCh   chan struct{}
 	world    *world.World
+	chests   map[world.BlockPos]*ChestData
+}
+
+// ChestData holds the 27-slot inventory of a placed chest.
+type ChestData struct {
+	Slots [27]Slot
 }
 
 // ItemEntity represents an item dropped on the ground.
@@ -129,6 +135,10 @@ type Player struct {
 	loadedChunks map[ChunkPos]bool
 	lastChunkX   int32
 	lastChunkZ   int32
+	DragSlots    []int16        // Slots being dragged over in mode 5
+	DragButton   int            // 0=left drag, 1=right drag
+	OpenWindowID byte           // 0 = no window open, 1 = chest
+	OpenChestPos world.BlockPos // Position of the open chest
 	mu           sync.Mutex
 }
 
@@ -143,10 +153,10 @@ func New(config Config) *Server {
 		config:   config,
 		players:  make(map[int32]*Player),
 		entities: make(map[int32]*ItemEntity),
-		mobs:     make(map[int32]*MobEntity),
 		nextEID:  1,
 		stopCh:   make(chan struct{}),
 		world:    world.NewWorld(seed),
+		chests:   make(map[world.BlockPos]*ChestData),
 	}
 }
 
@@ -746,6 +756,49 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			if world.IsInstantBreak(blockState >> 4) {
 				s.handleBlockBreak(player, x, y, z)
 			}
+		} else if status == 3 || status == 4 {
+			// Status 3 = drop item stack (Ctrl+Q), status 4 = drop single item (Q)
+			player.mu.Lock()
+			slotIndex := 36 + player.ActiveSlot
+			if player.Inventory[slotIndex].ItemID != -1 {
+				dropItemID := player.Inventory[slotIndex].ItemID
+				dropDamage := player.Inventory[slotIndex].Damage
+				var dropCount byte = 1
+				if status == 3 {
+					// Ctrl+Q: drop entire stack
+					dropCount = player.Inventory[slotIndex].Count
+				}
+
+				player.Inventory[slotIndex].Count -= dropCount
+				if player.Inventory[slotIndex].Count <= 0 {
+					player.Inventory[slotIndex] = Slot{ItemID: -1}
+				}
+
+				// Sync slot to client
+				slot := player.Inventory[slotIndex]
+				syncPkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+					protocol.WriteByte(w, 0) // Window ID 0 = player inventory
+					protocol.WriteInt16(w, int16(slotIndex))
+					protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+				})
+				if player.Conn != nil {
+					protocol.WritePacket(player.Conn, syncPkt)
+				}
+
+				px, py, pz := player.X, player.Y, player.Z
+				f1 := math.Sin(float64(player.Yaw) * math.Pi / 180.0)
+				f2 := math.Cos(float64(player.Yaw) * math.Pi / 180.0)
+				f3 := math.Sin(float64(player.Pitch) * math.Pi / 180.0)
+				f4 := math.Cos(float64(player.Pitch) * math.Pi / 180.0)
+				vx := -f1 * f4 * 0.3
+				vy := -f3*0.3 + 0.1
+				vz := f2 * f4 * 0.3
+
+				player.mu.Unlock()
+				s.SpawnItem(px, py+1.5, pz, vx, vy, vz, dropItemID, dropDamage, dropCount)
+			} else {
+				player.mu.Unlock()
+			}
 		}
 
 	case 0x0A: // Animation
@@ -791,7 +844,7 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		x, y, z, _ := protocol.ReadPosition(r)
 		face, _ := protocol.ReadByte(r)
 		// Read held item slot data
-		itemID, _, itemDamage, _ := protocol.ReadSlotData(r)
+		itemID, _, _, _ := protocol.ReadSlotData(r)
 		// Cursor position (3 bytes) — ignored
 		_, _ = protocol.ReadByte(r)
 		_, _ = protocol.ReadByte(r)
@@ -831,35 +884,10 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			return
 		}
 
-		// Handle spawn egg usage
-		if itemID == SpawnEggItemID && x != -1 {
-			mobType := byte(itemDamage)
-			if IsValidSpawnEggType(mobType) {
-				tx, ty, tz := faceOffset(x, y, z, face)
-				s.SpawnMob(float64(tx)+0.5, float64(ty), float64(tz)+0.5, 0, 0, mobType)
-				// Decrement item in survival mode
-				if player.GameMode == GameModeSurvival {
-					player.mu.Lock()
-					slotIndex := 36 + player.ActiveSlot
-					if player.Inventory[slotIndex].ItemID == SpawnEggItemID && player.Inventory[slotIndex].Count > 0 {
-						player.Inventory[slotIndex].Count--
-						if player.Inventory[slotIndex].Count <= 0 {
-							player.Inventory[slotIndex] = Slot{ItemID: -1}
-						}
-						slot := player.Inventory[slotIndex]
-						pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
-							protocol.WriteByte(w, 0)
-							protocol.WriteInt16(w, int16(slotIndex))
-							protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
-						})
-						if player.Conn != nil {
-							protocol.WritePacket(player.Conn, pkt)
-						}
-					}
-					player.mu.Unlock()
-				}
-				log.Printf("Player %s spawned mob type %d at (%d, %d, %d)", player.Username, mobType, tx, ty, tz)
-			}
+		// Check if right-clicking on a chest to open it
+		clickedBlock := s.world.GetBlock(x, y, z)
+		if clickedBlock>>4 == 54 {
+			s.openChest(player, x, y, z)
 			return
 		}
 
@@ -924,6 +952,34 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 
 		// Set block in world
 		blockState := uint16(itemID) << 4
+		// For chests, compute facing from player yaw
+		if itemID == 54 {
+			yaw := float64(player.Yaw)
+			yaw = math.Mod(yaw, 360)
+			if yaw < 0 {
+				yaw += 360
+			}
+			var facing uint16
+			switch {
+			case yaw >= 315 || yaw < 45:
+				facing = 3 // south (+Z) — player faces south, chest faces toward player
+			case yaw >= 45 && yaw < 135:
+				facing = 4 // west (-X)
+			case yaw >= 135 && yaw < 225:
+				facing = 2 // north (-Z)
+			case yaw >= 225 && yaw < 315:
+				facing = 5 // east (+X)
+			}
+			blockState = (54 << 4) | facing
+			// Create chest storage
+			pos := world.BlockPos{X: tx, Y: ty, Z: tz}
+			s.mu.Lock()
+			s.chests[pos] = &ChestData{}
+			for i := range s.chests[pos].Slots {
+				s.chests[pos].Slots[i].ItemID = -1
+			}
+			s.mu.Unlock()
+		}
 		s.world.SetBlock(tx, ty, tz, blockState)
 
 		// Broadcast block change to all players
@@ -1058,6 +1114,173 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 						player.Cursor = temp
 					}
 				}
+			} else if mode == 1 { // Shift-click
+				if player.Inventory[slotNum].ItemID != -1 {
+					item := player.Inventory[slotNum]
+					moved := false
+					var destStart, destEnd int
+					if slotNum >= 36 && slotNum <= 44 {
+						destStart, destEnd = 9, 35
+					} else if slotNum >= 9 && slotNum <= 35 {
+						destStart, destEnd = 36, 44
+					} else if slotNum >= 5 && slotNum <= 8 {
+						destStart, destEnd = 36, 44
+					} else {
+						destStart, destEnd = 9, 35
+					}
+					// First pass: try to stack onto existing matching items
+					remaining := item.Count
+					for i := destStart; i <= destEnd && remaining > 0; i++ {
+						if player.Inventory[i].ItemID == item.ItemID && player.Inventory[i].Damage == item.Damage && player.Inventory[i].Count < 64 {
+							space := 64 - player.Inventory[i].Count
+							if remaining <= space {
+								player.Inventory[i].Count += remaining
+								remaining = 0
+							} else {
+								player.Inventory[i].Count = 64
+								remaining -= space
+							}
+						}
+					}
+					// Second pass: put remainder in empty slots
+					for i := destStart; i <= destEnd && remaining > 0; i++ {
+						if player.Inventory[i].ItemID == -1 {
+							player.Inventory[i] = Slot{ItemID: item.ItemID, Damage: item.Damage, Count: remaining}
+							remaining = 0
+						}
+					}
+					if remaining == 0 {
+						player.Inventory[slotNum] = Slot{ItemID: -1}
+						moved = true
+					} else if remaining < item.Count {
+						player.Inventory[slotNum].Count = remaining
+					}
+					// For armor slots, if not moved try main inventory as fallback
+					if !moved && (slotNum >= 5 && slotNum <= 8) {
+						remaining = player.Inventory[slotNum].Count
+						for i := 9; i <= 35 && remaining > 0; i++ {
+							if player.Inventory[i].ItemID == item.ItemID && player.Inventory[i].Damage == item.Damage && player.Inventory[i].Count < 64 {
+								space := 64 - player.Inventory[i].Count
+								if remaining <= space {
+									player.Inventory[i].Count += remaining
+									remaining = 0
+								} else {
+									player.Inventory[i].Count = 64
+									remaining -= space
+								}
+							}
+						}
+						for i := 9; i <= 35 && remaining > 0; i++ {
+							if player.Inventory[i].ItemID == -1 {
+								player.Inventory[i] = Slot{ItemID: item.ItemID, Damage: item.Damage, Count: remaining}
+								remaining = 0
+							}
+						}
+						if remaining == 0 {
+							player.Inventory[slotNum] = Slot{ItemID: -1}
+						} else if remaining < player.Inventory[slotNum].Count {
+							player.Inventory[slotNum].Count = remaining
+						}
+					}
+				}
+			} else if mode == 2 { // Number key hotkey
+				// button = hotkey number (0-8), maps to hotbar slot 36+button
+				hotbarSlot := int16(36) + int16(button)
+				if hotbarSlot >= 36 && hotbarSlot <= 44 {
+					temp := player.Inventory[slotNum]
+					player.Inventory[slotNum] = player.Inventory[hotbarSlot]
+					player.Inventory[hotbarSlot] = temp
+				}
+			}
+		}
+
+		// Mode 6 is double-click to collect matching items onto cursor
+		if mode == 6 && player.Cursor.ItemID != -1 {
+			for i := 0; i < 45 && player.Cursor.Count < 64; i++ {
+				if player.Inventory[i].ItemID == player.Cursor.ItemID && player.Inventory[i].Damage == player.Cursor.Damage {
+					space := 64 - player.Cursor.Count
+					if player.Inventory[i].Count <= space {
+						player.Cursor.Count += player.Inventory[i].Count
+						player.Inventory[i] = Slot{ItemID: -1}
+					} else {
+						player.Cursor.Count = 64
+						player.Inventory[i].Count -= space
+					}
+				}
+			}
+		}
+
+		// Mode 5 is drag/paint (hold click and drag across slots)
+		if mode == 5 {
+			switch button {
+			case 0: // Left drag start
+				player.DragSlots = nil
+				player.DragButton = 0
+			case 4: // Right drag start
+				player.DragSlots = nil
+				player.DragButton = 1
+			case 1: // Left drag add slot
+				if slotNum >= 0 && slotNum < 45 {
+					player.DragSlots = append(player.DragSlots, slotNum)
+				}
+			case 5: // Right drag add slot
+				if slotNum >= 0 && slotNum < 45 {
+					player.DragSlots = append(player.DragSlots, slotNum)
+				}
+			case 2: // Left drag end - distribute evenly
+				if player.Cursor.ItemID != -1 && len(player.DragSlots) > 0 {
+					perSlot := player.Cursor.Count / byte(len(player.DragSlots))
+					if perSlot < 1 {
+						perSlot = 1
+					}
+					for _, ds := range player.DragSlots {
+						if player.Cursor.Count <= 0 {
+							break
+						}
+						if player.Inventory[ds].ItemID == -1 {
+							give := perSlot
+							if give > player.Cursor.Count {
+								give = player.Cursor.Count
+							}
+							player.Inventory[ds] = Slot{ItemID: player.Cursor.ItemID, Damage: player.Cursor.Damage, Count: give}
+							player.Cursor.Count -= give
+						} else if player.Inventory[ds].ItemID == player.Cursor.ItemID && player.Inventory[ds].Damage == player.Cursor.Damage {
+							space := 64 - player.Inventory[ds].Count
+							give := perSlot
+							if give > space {
+								give = space
+							}
+							if give > player.Cursor.Count {
+								give = player.Cursor.Count
+							}
+							player.Inventory[ds].Count += give
+							player.Cursor.Count -= give
+						}
+					}
+					if player.Cursor.Count <= 0 {
+						player.Cursor = Slot{ItemID: -1}
+					}
+				}
+				player.DragSlots = nil
+			case 6: // Right drag end - place one per slot
+				if player.Cursor.ItemID != -1 && len(player.DragSlots) > 0 {
+					for _, ds := range player.DragSlots {
+						if player.Cursor.Count <= 0 {
+							break
+						}
+						if player.Inventory[ds].ItemID == -1 {
+							player.Inventory[ds] = Slot{ItemID: player.Cursor.ItemID, Damage: player.Cursor.Damage, Count: 1}
+							player.Cursor.Count--
+						} else if player.Inventory[ds].ItemID == player.Cursor.ItemID && player.Inventory[ds].Damage == player.Cursor.Damage && player.Inventory[ds].Count < 64 {
+							player.Inventory[ds].Count++
+							player.Cursor.Count--
+						}
+					}
+					if player.Cursor.Count <= 0 {
+						player.Cursor = Slot{ItemID: -1}
+					}
+				}
+				player.DragSlots = nil
 			}
 		}
 
@@ -1065,6 +1288,9 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		if mode == 4 && player.GameMode != GameModeSpectator {
 			if slotNum == -999 { // Drop from cursor
 				if player.Cursor.ItemID != -1 {
+					// Save item data BEFORE modifying cursor
+					vitemID := player.Cursor.ItemID
+					vdamage := player.Cursor.Damage
 					dropCount := player.Cursor.Count
 					if button == 0 { // Left click drops 1
 						dropCount = 1
@@ -1085,15 +1311,15 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 					vy := -f3*0.3 + 0.1
 					vz := f2 * f4 * 0.3
 
-					vitemID := player.Cursor.ItemID
-					vdamage := player.Cursor.Damage
-
 					player.mu.Unlock() // unlock to spawn
 					s.SpawnItem(px, py+1.5, pz, vx, vy, vz, vitemID, vdamage, dropCount)
 					player.mu.Lock()
 				}
 			} else if slotNum >= 0 && slotNum < 45 {
 				if player.Inventory[slotNum].ItemID != -1 {
+					// Save item data BEFORE modifying slot
+					dropItemID := player.Inventory[slotNum].ItemID
+					dropDamage := player.Inventory[slotNum].Damage
 					dropCount := player.Inventory[slotNum].Count
 					if button == 0 { // Q drops 1
 						dropCount = 1
@@ -1101,10 +1327,9 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 						if player.Inventory[slotNum].Count <= 0 {
 							player.Inventory[slotNum] = Slot{ItemID: -1}
 						}
+					} else { // Ctrl+Q drops all
 						player.Inventory[slotNum] = Slot{ItemID: -1}
 					}
-					dropItemID := player.Inventory[slotNum].ItemID
-					dropDamage := player.Inventory[slotNum].Damage
 
 					f1 := math.Sin(float64(player.Yaw) * math.Pi / 180.0)
 					f2 := math.Cos(float64(player.Yaw) * math.Pi / 180.0)
@@ -1361,9 +1586,6 @@ func (s *Server) spawnEntitiesForPlayer(player *Player) {
 	for _, entity := range s.entities {
 		s.sendItemToPlayer(player, entity)
 	}
-	for _, mob := range s.mobs {
-		s.sendMobToPlayer(player, mob)
-	}
 }
 
 func (s *Server) sendItemToPlayer(player *Player, item *ItemEntity) {
@@ -1374,12 +1596,9 @@ func (s *Server) sendItemToPlayer(player *Player, item *ItemEntity) {
 		protocol.WriteInt32(w, int32(item.X*32))
 		protocol.WriteInt32(w, int32(item.Y*32))
 		protocol.WriteInt32(w, int32(item.Z*32))
-		protocol.WriteByte(w, 0) // Pitch
-		protocol.WriteByte(w, 0) // Yaw
-		protocol.WriteInt32(w, 1) // Data: non-zero to include velocity
-		protocol.WriteInt16(w, int16(item.VX*8000))
-		protocol.WriteInt16(w, int16(item.VY*8000))
-		protocol.WriteInt16(w, int16(item.VZ*8000))
+		protocol.WriteByte(w, 0)  // Pitch
+		protocol.WriteByte(w, 0)  // Yaw
+		protocol.WriteInt32(w, 0) // Data (needs to be non-zero for some objects, but 0 often means no velocity)
 	})
 
 	// Entity Metadata - 0x1C
@@ -1967,6 +2186,8 @@ func (s *Server) handleCommand(player *Player, message string) {
 	switch cmd {
 	case "/gamemode", "/gm":
 		s.handleGamemodeCommand(player, parts[1:])
+	case "/tp", "/teleport":
+		s.handleTpCommand(player, parts[1:])
 	default:
 		s.sendChatToPlayer(player, chat.Colored("Unknown command: "+cmd, "red"))
 	}
@@ -2018,6 +2239,80 @@ func (s *Server) handleGamemodeCommand(player *Player, args []string) {
 	modeName := GameModeName(mode)
 	s.sendChatToPlayer(player, chat.Colored("Game mode set to "+modeName, "gray"))
 	log.Printf("Player %s game mode changed to %s", player.Username, modeName)
+}
+
+// handleTpCommand handles the /tp command.
+// Usage: /tp <x> <y> <z> — teleport to coordinates
+// Usage: /tp <player>    — teleport to another player
+func (s *Server) handleTpCommand(player *Player, args []string) {
+	if len(args) == 3 {
+		// /tp <x> <y> <z>
+		x, err1 := strconv.ParseFloat(args[0], 64)
+		y, err2 := strconv.ParseFloat(args[1], 64)
+		z, err3 := strconv.ParseFloat(args[2], 64)
+		if err1 != nil || err2 != nil || err3 != nil {
+			s.sendChatToPlayer(player, chat.Colored("Invalid coordinates. Usage: /tp <x> <y> <z>", "red"))
+			return
+		}
+		s.teleportPlayer(player, x, y, z)
+		s.sendChatToPlayer(player, chat.Colored(fmt.Sprintf("Teleported to %.1f, %.1f, %.1f", x, y, z), "gray"))
+		log.Printf("Player %s teleported to %.1f, %.1f, %.1f", player.Username, x, y, z)
+	} else if len(args) == 1 {
+		// /tp <player>
+		targetName := args[0]
+		s.mu.RLock()
+		var target *Player
+		for _, p := range s.players {
+			if strings.EqualFold(p.Username, targetName) {
+				target = p
+				break
+			}
+		}
+		s.mu.RUnlock()
+
+		if target == nil {
+			s.sendChatToPlayer(player, chat.Colored("Player not found: "+targetName, "red"))
+			return
+		}
+
+		target.mu.Lock()
+		tx, ty, tz := target.X, target.Y, target.Z
+		target.mu.Unlock()
+
+		s.teleportPlayer(player, tx, ty, tz)
+		s.sendChatToPlayer(player, chat.Colored("Teleported to "+target.Username, "gray"))
+		log.Printf("Player %s teleported to %s (%.1f, %.1f, %.1f)", player.Username, target.Username, tx, ty, tz)
+	} else {
+		s.sendChatToPlayer(player, chat.Colored("Usage: /tp <x> <y> <z> or /tp <player>", "red"))
+	}
+}
+
+// teleportPlayer moves a player to the given coordinates and syncs the change.
+func (s *Server) teleportPlayer(player *Player, x, y, z float64) {
+	player.mu.Lock()
+	player.X = x
+	player.Y = y
+	player.Z = z
+	player.mu.Unlock()
+
+	// Send Player Position And Look to the teleported player
+	posLook := protocol.MarshalPacket(0x08, func(w *bytes.Buffer) {
+		protocol.WriteFloat64(w, x)
+		protocol.WriteFloat64(w, y)
+		protocol.WriteFloat64(w, z)
+		protocol.WriteFloat32(w, player.Yaw)
+		protocol.WriteFloat32(w, player.Pitch)
+		protocol.WriteByte(w, 0) // Flags (all absolute)
+	})
+	player.mu.Lock()
+	protocol.WritePacket(player.Conn, posLook)
+	player.mu.Unlock()
+
+	// Broadcast teleport to other players
+	s.broadcastEntityTeleport(player)
+
+	// Load/unload chunks around new position
+	s.sendChunkUpdates(player)
 }
 
 // GameModeName returns the display name for a gamemode.
@@ -2106,9 +2401,14 @@ func (s *Server) broadcastSpawnItem(item *ItemEntity) {
 		protocol.WriteInt32(w, int32(item.X*32))
 		protocol.WriteInt32(w, int32(item.Y*32))
 		protocol.WriteInt32(w, int32(item.Z*32))
-		protocol.WriteByte(w, 0) // Pitch
-		protocol.WriteByte(w, 0) // Yaw
-		protocol.WriteInt32(w, 1) // Data: non-zero to include velocity
+		protocol.WriteByte(w, 0)  // Pitch
+		protocol.WriteByte(w, 0)  // Yaw
+		protocol.WriteInt32(w, 0) // Data for thrower (0 usually)
+	})
+
+	// Entity Velocity - 0x12
+	velocityPkt := protocol.MarshalPacket(0x12, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, item.EntityID)
 		protocol.WriteInt16(w, int16(item.VX*8000))
 		protocol.WriteInt16(w, int16(item.VY*8000))
 		protocol.WriteInt16(w, int16(item.VZ*8000))
@@ -2130,71 +2430,11 @@ func (s *Server) broadcastSpawnItem(item *ItemEntity) {
 		p.mu.Lock()
 		if p.Conn != nil {
 			protocol.WritePacket(p.Conn, spawnObj)
+			protocol.WritePacket(p.Conn, velocityPkt)
 			protocol.WritePacket(p.Conn, metadata)
 		}
 		p.mu.Unlock()
 	}
-}
-
-// SpawnMob creates a mob entity at the given position and broadcasts it.
-func (s *Server) SpawnMob(x, y, z float64, yaw, pitch float32, typeID byte) {
-	s.mu.Lock()
-	eid := s.nextEID
-	s.nextEID++
-
-	mob := &MobEntity{
-		EntityID: eid,
-		TypeID:   typeID,
-		X:        x,
-		Y:        y,
-		Z:        z,
-		Yaw:      yaw,
-		Pitch:    pitch,
-	}
-	s.mobs[eid] = mob
-	s.mu.Unlock()
-
-	s.broadcastSpawnMob(mob)
-}
-
-func (s *Server) broadcastSpawnMob(mob *MobEntity) {
-	pkt := s.makeSpawnMobPacket(mob)
-
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	for _, p := range s.players {
-		p.mu.Lock()
-		if p.Conn != nil {
-			protocol.WritePacket(p.Conn, pkt)
-		}
-		p.mu.Unlock()
-	}
-}
-
-func (s *Server) sendMobToPlayer(player *Player, mob *MobEntity) {
-	pkt := s.makeSpawnMobPacket(mob)
-
-	player.mu.Lock()
-	protocol.WritePacket(player.Conn, pkt)
-	player.mu.Unlock()
-}
-
-func (s *Server) makeSpawnMobPacket(mob *MobEntity) *protocol.Packet {
-	// Spawn Mob - 0x0F
-	return protocol.MarshalPacket(0x0F, func(w *bytes.Buffer) {
-		protocol.WriteVarInt(w, mob.EntityID)
-		protocol.WriteByte(w, mob.TypeID)
-		protocol.WriteInt32(w, int32(mob.X*32)) // Fixed-point X
-		protocol.WriteInt32(w, int32(mob.Y*32)) // Fixed-point Y
-		protocol.WriteInt32(w, int32(mob.Z*32)) // Fixed-point Z
-		protocol.WriteByte(w, byte(mob.Yaw*256/360))
-		protocol.WriteByte(w, byte(mob.Pitch*256/360))
-		protocol.WriteByte(w, byte(mob.Pitch*256/360)) // Head Pitch
-		protocol.WriteInt16(w, 0)    // Velocity X
-		protocol.WriteInt16(w, 0)    // Velocity Y
-		protocol.WriteInt16(w, 0)    // Velocity Z
-		protocol.WriteByte(w, 0x7F)  // Entity metadata terminator
-	})
 }
 
 func (s *Server) broadcastCollectItem(collectedID, collectorID int32) {
