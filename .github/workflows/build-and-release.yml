@@ -21,14 +21,35 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build Linux
+      - name: Build Linux amd64
         run: GOOS=linux GOARCH=amd64 go build -o vibeshitcraft-linux-amd64 ./cmd/server/
 
-      - name: Build Windows
+      - name: Build Linux x86
+        run: GOOS=linux GOARCH=386 go build -o vibeshitcraft-linux-x86 ./cmd/server/
+
+      - name: Build Linux ARM64
+        run: GOOS=linux GOARCH=arm64 go build -o vibeshitcraft-linux-arm64 ./cmd/server/
+
+      - name: Build Linux ARMv7
+        run: GOOS=linux GOARCH=arm GOARM=7 go build -o vibeshitcraft-linux-armv7 ./cmd/server/
+
+      - name: Build Linux MIPSLE softfloat
+        run: GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -o vibeshitcraft-linux-mipsle-softfloat ./cmd/server/
+
+      - name: Build Linux MIPSBE
+        run: GOOS=linux GOARCH=mips go build -o vibeshitcraft-linux-mipsbe ./cmd/server/
+
+      - name: Build Windows amd64
         run: GOOS=windows GOARCH=amd64 go build -o vibeshitcraft-windows-amd64.exe ./cmd/server/
 
-      - name: Build macOS
+      - name: Build Windows x86
+        run: GOOS=windows GOARCH=386 go build -o vibeshitcraft-windows-x86.exe ./cmd/server/
+
+      - name: Build macOS amd64
         run: GOOS=darwin GOARCH=amd64 go build -o vibeshitcraft-darwin-amd64 ./cmd/server/
+
+      - name: Build macOS ARM64
+        run: GOOS=darwin GOARCH=arm64 go build -o vibeshitcraft-darwin-arm64 ./cmd/server/
 
       - name: Compute padded run number
         id: padded
@@ -42,6 +63,13 @@ jobs:
           body: "Built from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})"
           files: |
             vibeshitcraft-linux-amd64
+            vibeshitcraft-linux-x86
+            vibeshitcraft-linux-arm64
+            vibeshitcraft-linux-armv7
+            vibeshitcraft-linux-mipsle-softfloat
+            vibeshitcraft-linux-mipsbe
             vibeshitcraft-windows-amd64.exe
+            vibeshitcraft-windows-x86.exe
             vibeshitcraft-darwin-amd64
+            vibeshitcraft-darwin-arm64
           make_latest: true
