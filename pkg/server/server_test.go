@@ -82,3 +82,92 @@ func TestPlayerCount(t *testing.T) {
 		t.Errorf("playerCount() = %d, want 0", srv.playerCount())
 	}
 }
+
+func TestAddItemToInventory(t *testing.T) {
+	player := &Player{}
+	for i := range player.Inventory {
+		player.Inventory[i].ItemID = -1
+	}
+
+	// Add first item - should go to hotbar slot 36
+	slot, ok := addItemToInventory(player, 3, 1)
+	if !ok {
+		t.Fatal("addItemToInventory failed for first item")
+	}
+	if slot != 36 {
+		t.Errorf("first item slot = %d, want 36", slot)
+	}
+	if player.Inventory[36].ItemID != 3 || player.Inventory[36].Count != 1 {
+		t.Errorf("slot 36 = {%d, %d}, want {3, 1}", player.Inventory[36].ItemID, player.Inventory[36].Count)
+	}
+
+	// Add same item again - should stack in slot 36
+	slot, ok = addItemToInventory(player, 3, 1)
+	if !ok {
+		t.Fatal("addItemToInventory failed for stacking")
+	}
+	if slot != 36 {
+		t.Errorf("stacked item slot = %d, want 36", slot)
+	}
+	if player.Inventory[36].Count != 2 {
+		t.Errorf("slot 36 count = %d, want 2", player.Inventory[36].Count)
+	}
+
+	// Add different item - should go to next empty hotbar slot 37
+	slot, ok = addItemToInventory(player, 4, 1)
+	if !ok {
+		t.Fatal("addItemToInventory failed for different item")
+	}
+	if slot != 37 {
+		t.Errorf("different item slot = %d, want 37", slot)
+	}
+}
+
+func TestAddItemToInventoryFull(t *testing.T) {
+	player := &Player{}
+	for i := range player.Inventory {
+		player.Inventory[i].ItemID = -1
+	}
+
+	// Fill all inventory slots (9-44) with a non-matching item at max stack
+	for i := 9; i <= 44; i++ {
+		player.Inventory[i] = Slot{ItemID: 1, Count: 64}
+	}
+
+	// Try to add a different item - should fail
+	_, ok := addItemToInventory(player, 3, 1)
+	if ok {
+		t.Error("addItemToInventory should fail when inventory is full")
+	}
+}
+
+func TestAddItemStackOverflow(t *testing.T) {
+	player := &Player{}
+	for i := range player.Inventory {
+		player.Inventory[i].ItemID = -1
+	}
+
+	// Put 63 items in slot 36
+	player.Inventory[36] = Slot{ItemID: 3, Count: 63}
+
+	// Add 1 more - should stack to 64
+	slot, ok := addItemToInventory(player, 3, 1)
+	if !ok {
+		t.Fatal("addItemToInventory failed for stacking to 64")
+	}
+	if slot != 36 {
+		t.Errorf("stacked item slot = %d, want 36", slot)
+	}
+	if player.Inventory[36].Count != 64 {
+		t.Errorf("slot 36 count = %d, want 64", player.Inventory[36].Count)
+	}
+
+	// Slot is now full (64), adding more of same item should go to next slot
+	slot, ok = addItemToInventory(player, 3, 1)
+	if !ok {
+		t.Fatal("addItemToInventory failed for new slot after full stack")
+	}
+	if slot != 37 {
+		t.Errorf("new slot = %d, want 37", slot)
+	}
+}
