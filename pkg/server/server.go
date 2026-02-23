@@ -26,6 +26,11 @@ const (
 	GameModeSpectator byte = 3
 )
 
+// Entity metadata flags (index 0, type byte).
+const (
+	EntityFlagInvisible byte = 0x20
+)
+
 // DefaultSeed is used when no seed is provided (0 means random).
 const DefaultSeed = 0
 
@@ -809,11 +814,25 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		// Ignore for now
 
 	case 0x13: // Player Abilities (serverbound)
-		// Client sends this when toggling flying — just consume the data.
-		// We do NOT respond, to avoid overriding the client's flying/noclip state.
-		_, _ = protocol.ReadByte(r)    // Flags from client
+		// Client sends this when toggling flying or when F3+N is pressed to
+		// cycle between Creative and Spectator.
+		clientFlags, _ := protocol.ReadByte(r)
 		_, _ = protocol.ReadFloat32(r) // Flying speed
 		_, _ = protocol.ReadFloat32(r) // Walking speed
+
+		player.mu.Lock()
+		currentMode := player.GameMode
+		player.mu.Unlock()
+
+		// Detect F3+N gamemode toggle by checking the Instant Break flag (0x08).
+		// Creative mode sets 0x08; Spectator does not.
+		if currentMode == GameModeCreative && (clientFlags&0x08) == 0 {
+			// Client removed Instant Break flag → switching to Spectator
+			s.switchGameMode(player, GameModeSpectator)
+		} else if currentMode == GameModeSpectator && (clientFlags&0x08) != 0 {
+			// Client set Instant Break flag → switching to Creative
+			s.switchGameMode(player, GameModeCreative)
+		}
 
 	case 0x17: // Plugin Message
 		// Ignore for now
@@ -850,7 +869,7 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		cursorY, _ := protocol.ReadByte(r)
 		_, _ = protocol.ReadByte(r) // cursorZ - unused
 
-		if player.GameMode == GameModeSpectator {
+		if player.GameMode == GameModeSpectator || player.GameMode == GameModeAdventure {
 			player.mu.Lock()
 			slotIndex := 36 + player.ActiveSlot
 			slot := player.Inventory[slotIndex]
@@ -863,7 +882,7 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 				protocol.WritePacket(player.Conn, pkt)
 			}
 			player.mu.Unlock()
-			return // spectators can't place blocks
+			return // spectators and adventure mode can't place blocks
 		}
 
 		// Special position (-1, -1, -1) means "use item" not placement
@@ -1702,6 +1721,7 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 	z := target.Z
 	yaw := target.Yaw
 	pitch := target.Pitch
+	targetGameMode := target.GameMode
 	// Determine the item ID currently held in the target's hand so the viewer
 	// immediately sees the correct held item model.
 	currentItemID := int16(0)
@@ -1730,6 +1750,12 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 	protocol.WritePacket(viewer.Conn, playerListAdd)
 	viewer.mu.Unlock()
 
+	// Entity flags: set invisible for spectators
+	var entityFlags byte
+	if targetGameMode == GameModeSpectator {
+		entityFlags = EntityFlagInvisible
+	}
+
 	// Spawn Player - 0x0C
 	spawnPlayer := protocol.MarshalPacket(0x0C, func(w *bytes.Buffer) {
 		protocol.WriteVarInt(w, target.EntityID)
@@ -1743,10 +1769,10 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 		protocol.WriteInt16(w, currentItemID)
 		// Minimal entity metadata so clients always receive a non-empty
 		// DataWatcher list for spawned players:
-		// Index 0, type 0 (byte) = entity flags, value 0
-		protocol.WriteByte(w, 0x00) // header: (type 0 << 5) | index 0
-		protocol.WriteByte(w, 0x00) // flags = 0
-		protocol.WriteByte(w, 0x7F) // Metadata terminator
+		// Index 0, type 0 (byte) = entity flags
+		protocol.WriteByte(w, 0x00)        // header: (type 0 << 5) | index 0
+		protocol.WriteByte(w, entityFlags) // flags (EntityFlagInvisible for spectators)
+		protocol.WriteByte(w, 0x7F)        // Metadata terminator
 	})
 	viewer.mu.Lock()
 	protocol.WritePacket(viewer.Conn, spawnPlayer)
@@ -2334,10 +2360,73 @@ func (s *Server) handleGamemodeCommand(player *Player, args []string) {
 	// Update gamemode in player list for all clients
 	s.broadcastPlayerListGamemode(player)
 
+	// Update entity visibility (spectators are invisible)
+	s.broadcastEntityFlags(player)
+
 	// Feedback
 	modeName := GameModeName(mode)
 	s.sendChatToPlayer(player, chat.Colored("Game mode set to "+modeName, "gray"))
 	log.Printf("Player %s game mode changed to %s", player.Username, modeName)
+}
+
+// switchGameMode changes a player's gamemode, sending all necessary packets
+// to the player and broadcasting updates to other players.
+func (s *Server) switchGameMode(player *Player, mode byte) {
+	player.mu.Lock()
+	player.GameMode = mode
+	player.mu.Unlock()
+
+	// Send Change Game State packet (reason=3 = change game mode)
+	changeGameState := protocol.MarshalPacket(0x2B, func(w *bytes.Buffer) {
+		protocol.WriteByte(w, 3)                // Reason: change game mode
+		protocol.WriteFloat32(w, float32(mode)) // Value: new game mode
+	})
+	player.mu.Lock()
+	protocol.WritePacket(player.Conn, changeGameState)
+	player.mu.Unlock()
+
+	// Send updated abilities
+	s.sendPlayerAbilities(player)
+
+	// Update gamemode in player list for all clients
+	s.broadcastPlayerListGamemode(player)
+
+	// Update entity visibility (spectators are invisible)
+	s.broadcastEntityFlags(player)
+
+	modeName := GameModeName(mode)
+	log.Printf("Player %s game mode changed to %s", player.Username, modeName)
+}
+
+// broadcastEntityFlags sends an Entity Metadata packet (0x1C) to all players
+// with updated entity flags (index 0) for the given player.
+// In spectator mode, the invisible flag (0x20) is set so the player appears
+// as a transparent head to other spectators and is invisible to non-spectators.
+func (s *Server) broadcastEntityFlags(player *Player) {
+	player.mu.Lock()
+	var flags byte
+	if player.GameMode == GameModeSpectator {
+		flags = EntityFlagInvisible
+	}
+	entityID := player.EntityID
+	player.mu.Unlock()
+
+	pkt := protocol.MarshalPacket(0x1C, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, entityID)
+		protocol.WriteByte(w, 0x00) // header: (type 0 << 5) | index 0 = entity flags
+		protocol.WriteByte(w, flags)
+		protocol.WriteByte(w, 0x7F) // Metadata terminator
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		p.mu.Lock()
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
+		p.mu.Unlock()
+	}
 }
 
 // handleTpCommand handles the /tp command.
@@ -2785,8 +2874,8 @@ func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
 			}
 
 			for _, e := range entities {
-				// Skip recently spawned items (2 second pickup delay)
-				if time.Since(e.SpawnTime) < 2*time.Second {
+				// Skip recently spawned items (1 second pickup delay)
+				if time.Since(e.SpawnTime) < 1*time.Second {
 					continue
 				}
 
@@ -2830,7 +2919,7 @@ func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
 						} else {
 							s.mu.Unlock()
 						}
-						break // only pick up one item per tick per player for simplicity
+						continue
 					}
 					player.mu.Unlock()
 				}
