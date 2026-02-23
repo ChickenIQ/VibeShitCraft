@@ -124,6 +124,7 @@ type Player struct {
 	loadedChunks map[ChunkPos]bool
 	lastChunkX   int32
 	lastChunkZ   int32
+	NoClip       bool           // True when in spectator mode (can pass through blocks)
 	DragSlots    []int16        // Slots being dragged over in mode 5
 	DragButton   int            // 0=left drag, 1=right drag
 	mu           sync.Mutex
@@ -510,6 +511,7 @@ func (s *Server) handleLoginStart(conn net.Conn, pkt *protocol.Packet) (*Player,
 		OnGround: true,
 		Health:   20.0,
 		IsDead:   false,
+		NoClip:   s.config.DefaultGameMode == GameModeSpectator,
 	}
 
 	// Initialize all inventory slots as empty
@@ -598,6 +600,8 @@ func (s *Server) handlePlay(player *Player) {
 		close(stopKeepAlive)
 		close(stopRegen)
 		close(stopPickup)
+		// Remove from tab list before removing from players map
+		s.broadcastPlayerListRemove(player.UUID)
 		s.mu.Lock()
 		delete(s.players, player.EntityID)
 		s.mu.Unlock()
@@ -2126,6 +2130,26 @@ func (s *Server) broadcastPlayerListGamemode(player *Player) {
 	}
 }
 
+// broadcastPlayerListRemove sends a Player List Item (action=4, Remove Player)
+// to all connected players, removing the target player from the tab list.
+func (s *Server) broadcastPlayerListRemove(uuid [16]byte) {
+	pkt := protocol.MarshalPacket(0x38, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, 4) // Action: Remove Player
+		protocol.WriteVarInt(w, 1) // Number of players
+		protocol.WriteUUID(w, uuid)
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		p.mu.Lock()
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
+		p.mu.Unlock()
+	}
+}
+
 // sendChatToPlayer sends a chat message to a single player.
 func (s *Server) sendChatToPlayer(player *Player, msg chat.Message) {
 	jsonMsg := msg.String()
@@ -2139,6 +2163,14 @@ func (s *Server) sendChatToPlayer(player *Player, msg chat.Message) {
 }
 
 func (s *Server) handleAttack(attacker *Player, targetID int32) {
+	// Spectators cannot attack
+	attacker.mu.Lock()
+	if attacker.GameMode == GameModeSpectator {
+		attacker.mu.Unlock()
+		return
+	}
+	attacker.mu.Unlock()
+
 	s.mu.RLock()
 	target, ok := s.players[targetID]
 	s.mu.RUnlock()
@@ -2343,6 +2375,7 @@ func (s *Server) handleGamemodeCommand(player *Player, args []string) {
 
 	player.mu.Lock()
 	player.GameMode = mode
+	player.NoClip = mode == GameModeSpectator
 	player.mu.Unlock()
 
 	// Send Change Game State packet (reason=3 = change game mode)
@@ -2374,6 +2407,7 @@ func (s *Server) handleGamemodeCommand(player *Player, args []string) {
 func (s *Server) switchGameMode(player *Player, mode byte) {
 	player.mu.Lock()
 	player.GameMode = mode
+	player.NoClip = mode == GameModeSpectator
 	player.mu.Unlock()
 
 	// Send Change Game State packet (reason=3 = change game mode)
