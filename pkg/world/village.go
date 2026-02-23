@@ -587,8 +587,8 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, s
 	}
 
 	// 2. Hanging Bell
-	place(hx+2, surfY+towerHeight+5, hz+2, 85<<4) // Fence hanging from belfry roof center
-	place(hx+2, surfY+towerHeight+4, hz+2, bell)  // The Gold Bell
+	place(hx+2, surfY+towerHeight+4, hz+2, 85<<4) // Fence hanging from belfry roof center
+	place(hx+2, surfY+towerHeight+3, hz+2, bell)  // The Gold Bell
 
 	// 3. Hall Construction
 	for dx := 0; dx <= hallMaxX; dx++ {
