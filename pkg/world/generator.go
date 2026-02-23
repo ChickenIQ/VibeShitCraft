@@ -7,27 +7,31 @@ import (
 
 // Generator produces terrain data from a seed using Perlin noise.
 type Generator struct {
-	Seed      int64
-	terrain   *Perlin // broad height map noise
-	roughness *Perlin // fine detail / roughness noise
-	tempNoise *Perlin // biome temperature
-	rainNoise *Perlin // biome rainfall
-	caveNoise *Perlin // 3D cave carving
-	cave2     *Perlin // secondary 3D cave noise for spaghetti caves
-	treeNoise *Perlin // tree placement
+	Seed       int64
+	terrain    *Perlin      // broad height map noise
+	roughness  *Perlin      // fine detail / roughness noise
+	tempNoise  *Perlin      // biome temperature
+	rainNoise  *Perlin      // biome rainfall
+	caveNoise  *Perlin      // 3D cave carving
+	cave2      *Perlin      // secondary 3D cave noise for spaghetti caves
+	treeNoise  *Perlin      // tree placement
+	boulderNoise *Perlin     // boulder placement
+	villageGen *VillageGrid // village placement grid
 }
 
 // NewGenerator creates a terrain generator from a seed.
 func NewGenerator(seed int64) *Generator {
 	return &Generator{
-		Seed:      seed,
-		terrain:   NewPerlin(seed),
-		roughness: NewPerlin(seed + 100),
-		tempNoise: NewPerlin(seed + 1),
-		rainNoise: NewPerlin(seed + 2),
-		caveNoise: NewPerlin(seed + 3),
-		cave2:     NewPerlin(seed + 5),
-		treeNoise: NewPerlin(seed + 4),
+		Seed:       seed,
+		terrain:    NewPerlin(seed),
+		roughness:  NewPerlin(seed + 100),
+		tempNoise:  NewPerlin(seed + 1),
+		rainNoise:  NewPerlin(seed + 2),
+		caveNoise:  NewPerlin(seed + 3),
+		cave2:      NewPerlin(seed + 5),
+		treeNoise:  NewPerlin(seed + 4),
+		boulderNoise: NewPerlin(seed + 200),
+		villageGen: NewVillageGrid(seed),
 	}
 }
 
@@ -46,7 +50,7 @@ func (g *Generator) isCave(x, y, z int) bool {
 
 // shouldPlaceTree returns true if a tree should be placed at (x, z) given the biome's density.
 func (g *Generator) shouldPlaceTree(x, z int, biome *Biome) bool {
-	if biome.TreeDensity <= 0 {
+	if biome.TreeDensity <= 0 || g.villageGen.IsInVillage(x, z) {
 		return false
 	}
 	const scale = 0.7
@@ -76,10 +80,9 @@ func (g *Generator) BlockAt(x, y, z int) uint16 {
 	}
 }
 
-// generateTrees places simple oak trees into the sections array for a chunk.
-// treeMap marks which columns have a tree so we can overlap leaves correctly.
+// generateTrees places various tree types based on biome.
 func (g *Generator) generateTrees(chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
-	for lx := 2; lx < 14; lx++ { // keep 2-block margin for leaves
+	for lx := 2; lx < 14; lx++ {
 		for lz := 2; lz < 14; lz++ {
 			wx := chunkX*16 + lx
 			wz := chunkZ*16 + lz
@@ -90,85 +93,265 @@ func (g *Generator) generateTrees(chunkX, chunkZ int, sections *[SectionsPerChun
 			}
 
 			surfaceY := g.SurfaceHeight(wx, wz)
-
-			// Sanity-check height
-			if surfaceY > 240 {
+			if surfaceY > 240 || g.isCave(wx, surfaceY, wz) {
 				continue
 			}
 
-			// Don't place in caves
-			if g.isCave(wx, surfaceY, wz) {
+			// Surface must be grass or snow
+			surfBlock := sections[surfaceY/16][(surfaceY%16*16+lz)*16+lx] >> 4
+			if surfBlock != 2 && surfBlock != 80 && surfBlock != 3 { // grass, snow, or dirt
 				continue
 			}
 
-			// Surface must be grass or snow to place tree
-			surfBlock := biome.SurfaceBlock >> 4
-			if surfBlock != 2 && surfBlock != 80 {
-				continue
-			}
-
-			// Place trunk (4 blocks of oak log, block ID 17)
-			trunkBase := surfaceY + 1
-			trunkTop := trunkBase + 3
-			for ty := trunkBase; ty <= trunkTop+1; ty++ {
-				if ty > 255 {
-					break
+			// Determine tree type
+			treeType := 0 // 0: Oak, 1: Spruce, 2: Birch, 3: Jungle, 4: Dark Oak
+			if biome == BiomeJungle {
+				treeType = 3
+			} else if biome == BiomeDarkForest {
+				treeType = 4
+			} else if biome == BiomeForest {
+				// 30% chance of Birch in forests
+				if (wx*31+wz*17)%10 < 3 {
+					treeType = 2
 				}
-				sec := ty / 16
-				sy := ty % 16
-				idx := (sy*16+lz)*16 + lx
-				sections[sec][idx] = 17 << 4 // oak log
+			} else if biome == BiomeExtremeHills || biome == BiomeSnowyTundra {
+				treeType = 1
 			}
 
-			// Place leaves (oak leaves = block ID 18)
-			leafBlock := uint16(18 << 4)
-			// Layer at trunkTop-1 and trunkTop: 5x5 cross with corners
-			for dy := -1; dy <= 0; dy++ {
-				ly := trunkTop + dy
-				if ly < 0 || ly > 255 {
+			switch treeType {
+			case 1: // Spruce
+				g.buildSpruceTree(lx, surfaceY+1, lz, sections)
+			case 2: // Birch
+				g.buildGenericTree(lx, surfaceY+1, lz, 2, sections)
+			case 3: // Jungle
+				g.buildJungleTree(lx, surfaceY+1, lz, sections)
+			case 4: // Dark Oak
+				g.buildDarkOakTree(lx, surfaceY+1, lz, sections)
+			default: // Oak
+				g.buildGenericTree(lx, surfaceY+1, lz, 0, sections)
+			}
+		}
+	}
+}
+
+// buildGenericTree builds a standard 5x5 rounded canopy tree (Oak or Birch).
+func (g *Generator) buildGenericTree(lx, y, lz int, meta uint16, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+	trunkTop := y + 3
+	// Trunk
+	for ty := y; ty <= trunkTop+1; ty++ {
+		sec, sy := ty/16, ty%16
+		current := sections[sec][(sy*16+lz)*16+lx] >> 4
+		if current == 0 || current == 31 || current == 18 || current == 161 {
+			sections[sec][(sy*16+lz)*16+lx] = 17<<4 | meta
+		}
+	}
+	// Leaves
+	leafBase := uint16(18<<4 | meta)
+	for dy := -1; dy <= 0; dy++ {
+		ly := trunkTop + dy
+		sec, sy := ly/16, ly%16
+		for dx := -2; dx <= 2; dx++ {
+			for dz := -2; dz <= 2; dz++ {
+				if (dx == -2 || dx == 2) && (dz == -2 || dz == 2) {
 					continue
 				}
-				sec := ly / 16
-				sy := ly % 16
-				for dx := -2; dx <= 2; dx++ {
-					for dz := -2; dz <= 2; dz++ {
-						nlx := lx + dx
-						nlz := lz + dz
-						if nlx < 0 || nlx > 15 || nlz < 0 || nlz > 15 {
-							continue
-						}
-						// Skip corners of 5x5
-						if (dx == -2 || dx == 2) && (dz == -2 || dz == 2) {
-							continue
-						}
-						idx := (sy*16+nlz)*16 + nlx
-						if sections[sec][idx] == 0 {
-							sections[sec][idx] = leafBlock
-						}
+				nlx, nlz := lx+dx, lz+dz
+				if nlx >= 0 && nlx < 16 && nlz >= 0 && nlz < 16 {
+					if sections[sec][(sy*16+nlz)*16+nlx] == 0 {
+						sections[sec][(sy*16+nlz)*16+nlx] = leafBase
 					}
 				}
 			}
-			// Layer at trunkTop+1: 3x3 cross
-			for dy := 1; dy <= 2; dy++ {
-				ly := trunkTop + dy
-				if ly < 0 || ly > 255 {
+		}
+	}
+	for dy := 1; dy <= 2; dy++ {
+		ly := trunkTop + dy
+		sec, sy := ly/16, ly%16
+		for dx := -1; dx <= 1; dx++ {
+			for dz := -1; dz <= 1; dz++ {
+				if dy == 2 && dx != 0 && dz != 0 {
 					continue
 				}
-				sec := ly / 16
-				sy := ly % 16
-				for dx := -1; dx <= 1; dx++ {
-					for dz := -1; dz <= 1; dz++ {
-						if dx != 0 && dz != 0 && dy == 2 {
-							continue // top layer is just a +
-						}
-						nlx := lx + dx
-						nlz := lz + dz
-						if nlx < 0 || nlx > 15 || nlz < 0 || nlz > 15 {
-							continue
-						}
-						idx := (sy*16+nlz)*16 + nlx
-						if sections[sec][idx] == 0 {
-							sections[sec][idx] = leafBlock
+				nlx, nlz := lx+dx, lz+dz
+				if nlx >= 0 && nlx < 16 && nlz >= 0 && nlz < 16 {
+					if sections[sec][(sy*16+nlz)*16+nlx] == 0 {
+						sections[sec][(sy*16+nlz)*16+nlx] = leafBase
+					}
+				}
+			}
+		}
+	}
+}
+
+// buildSpruceTree builds a conical spruce tree.
+func (g *Generator) buildSpruceTree(lx, y, lz int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+	height := 5 + (lx*13+lz*7)%3
+	trunkTop := y + height - 1
+	// Trunk
+	for ty := y; ty <= trunkTop; ty++ {
+		sec, sy := ty/16, ty%16
+		current := sections[sec][(sy*16+lz)*16+lx] >> 4
+		if current == 0 || current == 31 || current == 18 || current == 161 {
+			sections[sec][(sy*16+lz)*16+lx] = 17<<4 | 1 // Spruce log
+		}
+	}
+	// Leaves
+	leafBase := uint16(18<<4 | 1) // Spruce leaves
+	for dy := 2; dy <= height; dy++ {
+		ly := y + dy
+		sec, sy := ly/16, ly%16
+		radius := 2
+		if dy > height-2 {
+			radius = 0
+		} else if dy > height-4 {
+			radius = 1
+		}
+		for dx := -radius; dx <= radius; dx++ {
+			for dz := -radius; dz <= radius; dz++ {
+				if radius > 1 && (dx == -radius || dx == radius) && (dz == -radius || dz == radius) {
+					continue
+				}
+				nlx, nlz := lx+dx, lz+dz
+				if nlx >= 0 && nlx < 16 && nlz >= 0 && nlz < 16 {
+					if sections[sec][(sy*16+nlz)*16+nlx] == 0 {
+						sections[sec][(sy*16+nlz)*16+nlx] = leafBase
+					}
+				}
+			}
+		}
+	}
+}
+
+// buildJungleTree builds a very tall jungle tree.
+func (g *Generator) buildJungleTree(lx, y, lz int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+	height := 8 + (lx*7+lz*13)%6
+	trunkTop := y + height - 1
+	// Trunk
+	for ty := y; ty <= trunkTop; ty++ {
+		sec, sy := ty/16, ty%16
+		current := sections[sec][(sy*16+lz)*16+lx] >> 4
+		if current == 0 || current == 31 || current == 18 || current == 161 {
+			sections[sec][(sy*16+lz)*16+lx] = 17<<4 | 3 // Jungle log
+		}
+	}
+	// Leaves (multiple layers)
+	leafBase := uint16(18<<4 | 3) // Jungle leaves
+	for dy := height - 3; dy <= height; dy++ {
+		radius := 2
+		if dy == height {
+			radius = 1
+		}
+		ly := y + dy
+		sec, sy := ly/16, ly%16
+		for dx := -radius; dx <= radius; dx++ {
+			for dz := -radius; dz <= radius; dz++ {
+				if (dx*dx+dz*dz) > radius*radius+1 {
+					continue
+				}
+				nlx, nlz := lx+dx, lz+dz
+				if nlx >= 0 && nlx < 16 && nlz >= 0 && nlz < 16 {
+					if sections[sec][(sy*16+nlz)*16+nlx] == 0 {
+						sections[sec][(sy*16+nlz)*16+nlx] = leafBase
+					}
+				}
+			}
+		}
+	}
+}
+
+// buildDarkOakTree builds a 2x2 trunk tree with a broad canopy.
+func (g *Generator) buildDarkOakTree(lx, y, lz int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+	height := 6 + (lx*3+lz*5)%3
+	trunkTop := y + height - 1
+	// 2x2 Trunk (if space permits)
+	for dx := 0; dx <= 1; dx++ {
+		for dz := 0; dz <= 1; dz++ {
+			nlx, nlz := lx+dx, lz+dz
+			if nlx < 16 && nlz < 16 {
+				for ty := y; ty <= trunkTop; ty++ {
+					sec, sy := ty/16, ty%16
+					current := sections[sec][(sy*16+nlz)*16+nlx] >> 4
+					if current == 0 || current == 31 || current == 18 || current == 161 {
+						sections[sec][(sy*16+nlz)*16+nlx] = 162<<4 | 1 // Dark Oak log
+					}
+				}
+			}
+		}
+	}
+	// Broad canopy
+	leafBase := uint16(161<<4 | 1) // Dark Oak leaves
+	for dy := height - 3; dy <= height; dy++ {
+		ly := y + dy
+		sec, sy := ly/16, ly%16
+		radius := 3
+		if dy == height {
+			radius = 2
+		}
+		for dx := -radius + 1; dx <= radius; dx++ {
+			for dz := -radius + 1; dz <= radius; dz++ {
+				if (dx*dx+dz*dz) > radius*radius+2 {
+					continue
+				}
+				nlx, nlz := lx+dx, lz+dz
+				if nlx >= 0 && nlx < 16 && nlz >= 0 && nlz < 16 {
+					if sections[sec][(sy*16+nlz)*16+nlx] == 0 {
+						sections[sec][(sy*16+nlz)*16+nlx] = leafBase
+					}
+				}
+			}
+		}
+	}
+}
+
+// generateBoulders places varied rock clusters.
+func (g *Generator) generateBoulders(chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+	for lx := 1; lx < 15; lx++ {
+		for lz := 1; lz < 15; lz++ {
+			wx, wz := chunkX*16+lx, chunkZ*16+lz
+			biome := BiomeAt(g.tempNoise, g.rainNoise, wx, wz)
+			if biome.BoulderDensity <= 0 {
+				continue
+			}
+			v := g.boulderNoise.Noise2D(float64(wx)*0.1, float64(wz)*0.1)
+			if v < 1.0-biome.BoulderDensity*5 || g.villageGen.IsInVillage(wx, wz) {
+				continue
+			}
+
+			y := g.SurfaceHeight(wx, wz)
+			sec, sy := y/16, y%16
+			if sections[sec][(sy*16+lz)*16+lx]>>4 != 2 && sections[sec][(sy*16+lz)*16+lx]>>4 != 3 {
+				continue
+			}
+
+			radius := 1 + (wx*wz)%2
+			for dx := -radius; dx <= radius; dx++ {
+				for dz := -radius; dz <= radius; dz++ {
+					if (dx*dx+dz*dz) > radius*radius+1 {
+						continue
+					}
+					nlx, nlz := lx+dx, lz+dz
+					if nlx < 0 || nlx >= 16 || nlz < 0 || nlz >= 16 {
+						continue
+					}
+					
+					// Material variety
+					h := (wx+dx*31+wz*dz*17)
+					block := uint16(4 << 4) // cobblestone
+					if h%3 == 0 {
+						block = 1 << 4 // stone
+					} else if h%5 == 0 {
+						block = 48 << 4 // mossy
+					} else if h%7 == 0 {
+						block = 44 << 4 // stone slab
+					}
+					
+					targetSec, targetSy := y/16, y%16
+					targetID := sections[targetSec][(targetSy*16+nlz)*16+nlx] >> 4
+					if targetID == 0 || targetID == 2 || targetID == 31 || targetID == 3 {
+						sections[targetSec][(targetSy*16+nlz)*16+nlx] = block
+						// Height variation
+						if (dx == 0 && dz == 0) || (radius > 1 && h%4 == 0) {
+							sections[(y+1)/16][((y+1)%16*16+nlz)*16+nlx] = block
 						}
 					}
 				}
@@ -204,7 +387,13 @@ func (g *Generator) GenerateChunkData(chunkX, chunkZ int) ([]byte, uint16) {
 		}
 	}
 
-	// Place trees on top of the terrain
+	// Place village structures
+	g.villageGen.generateVillage(chunkX, chunkZ, FlatSurfaceY, &sections)
+
+	// Place boulders
+	g.generateBoulders(chunkX, chunkZ, &sections)
+
+	// Place trees
 	g.generateTrees(chunkX, chunkZ, &sections)
 
 	// Serialize

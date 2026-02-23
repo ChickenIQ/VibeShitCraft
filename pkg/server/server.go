@@ -83,6 +83,8 @@ type Player struct {
 	Yaw          float32
 	Pitch        float32
 	OnGround     bool
+	Health       float32
+	IsDead       bool
 	Inventory    [45]Slot
 	loadedChunks map[ChunkPos]bool
 	lastChunkX   int32
@@ -295,6 +297,8 @@ func (s *Server) handleLoginStart(conn net.Conn, pkt *protocol.Packet) (*Player,
 		Yaw:      0,
 		Pitch:    0,
 		OnGround: true,
+		Health:   20.0,
+		IsDead:   false,
 	}
 
 	// Initialize all inventory slots as empty
@@ -510,8 +514,27 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 	case 0x17: // Plugin Message
 		// Ignore for now
 
+	case 0x02: // Use Entity
+		targetID, _, err := protocol.ReadVarInt(r)
+		if err != nil {
+			return
+		}
+		useType, _, err := protocol.ReadVarInt(r)
+		if err != nil {
+			return
+		}
+		if useType == 1 { // Attack
+			s.handleAttack(player, targetID)
+		}
+
 	case 0x16: // Client Status
-		// Ignore for now
+		actionID, _, err := protocol.ReadVarInt(r)
+		if err != nil {
+			return
+		}
+		if actionID == 0 { // Perform Respawn
+			s.handleRespawn(player)
+		}
 
 	case 0x08: // Block Placement
 		x, y, z, _ := protocol.ReadPosition(r)
@@ -1115,6 +1138,129 @@ func (s *Server) sendChatToPlayer(player *Player, msg chat.Message) {
 	player.mu.Lock()
 	protocol.WritePacket(player.Conn, pkt)
 	player.mu.Unlock()
+}
+
+func (s *Server) handleAttack(attacker *Player, targetID int32) {
+	s.mu.RLock()
+	target, ok := s.players[targetID]
+	s.mu.RUnlock()
+	if !ok {
+		return
+	}
+
+	target.mu.Lock()
+	if target.IsDead || target.GameMode == GameModeCreative || target.GameMode == GameModeSpectator {
+		target.mu.Unlock()
+		return
+	}
+
+	// Apply damage
+	damage := float32(2.0) // 1 heart
+	target.Health -= damage
+	if target.Health <= 0 {
+		target.Health = 0
+		target.IsDead = true
+	}
+	isDead := target.IsDead
+	target.mu.Unlock()
+
+	// Broadcast damage animation (1 = take damage)
+	s.broadcastAnimation(target, 1)
+	// Broadcast hurt status (2 = hurt)
+	s.broadcastEntityStatus(target.EntityID, 2)
+
+	// Update health for the target player
+	s.sendHealth(target)
+
+	if isDead {
+		// Broadcast dead status (3 = dead)
+		s.broadcastEntityStatus(target.EntityID, 3)
+		// Broadcast death message
+		s.broadcastChat(chat.Colored(target.Username+" was slain by "+attacker.Username, "red"))
+		log.Printf("Player %s was slain by %s", target.Username, attacker.Username)
+	}
+}
+
+func (s *Server) handleRespawn(player *Player) {
+	player.mu.Lock()
+	if !player.IsDead {
+		player.mu.Unlock()
+		return
+	}
+
+	// Reset health and state
+	player.Health = 20.0
+	player.IsDead = false
+
+	// Reset position to spawn (8, spawnY, 8)
+	spawnY := float64(s.world.Gen.SurfaceHeight(8, 8)) + 1.0
+	player.X = 8
+	player.Y = spawnY
+	player.Z = 8
+	player.mu.Unlock()
+
+	// 0x07 Respawn packet
+	respawnPkt := protocol.MarshalPacket(0x07, func(w *bytes.Buffer) {
+		protocol.WriteInt32(w, 0) // Overworld
+		protocol.WriteByte(w, 0)  // Peaceful difficulty
+		protocol.WriteByte(w, player.GameMode)
+		protocol.WriteString(w, "default")
+	})
+	player.mu.Lock()
+	protocol.WritePacket(player.Conn, respawnPkt)
+	player.mu.Unlock()
+
+	// Send Position
+	posLook := protocol.MarshalPacket(0x08, func(w *bytes.Buffer) {
+		protocol.WriteFloat64(w, player.X)
+		protocol.WriteFloat64(w, player.Y)
+		protocol.WriteFloat64(w, player.Z)
+		protocol.WriteFloat32(w, 0)
+		protocol.WriteFloat32(w, 0)
+		protocol.WriteByte(w, 0) // Flags
+	})
+	player.mu.Lock()
+	protocol.WritePacket(player.Conn, posLook)
+	player.mu.Unlock()
+
+	// Update health
+	s.sendHealth(player)
+
+	// Re-spawn for others
+	s.broadcastDestroyEntity(player.EntityID)
+	s.spawnPlayerForOthers(player)
+
+	log.Printf("Player %s respawned", player.Username)
+}
+
+func (s *Server) sendHealth(player *Player) {
+	player.mu.Lock()
+	health := player.Health
+	player.mu.Unlock()
+
+	pkt := protocol.MarshalPacket(0x06, func(w *bytes.Buffer) {
+		protocol.WriteFloat32(w, health)
+		protocol.WriteVarInt(w, 20)   // Food
+		protocol.WriteFloat32(w, 5.0) // Food Saturation
+	})
+	player.mu.Lock()
+	protocol.WritePacket(player.Conn, pkt)
+	player.mu.Unlock()
+}
+
+func (s *Server) broadcastEntityStatus(entityID int32, status byte) {
+	pkt := protocol.MarshalPacket(0x1A, func(w *bytes.Buffer) {
+		protocol.WriteInt32(w, entityID)
+		protocol.WriteByte(w, status)
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		p.mu.Lock()
+		protocol.WritePacket(p.Conn, pkt)
+		p.mu.Unlock()
+	}
 }
 
 // handleCommand dispatches a /-prefixed command from a player.

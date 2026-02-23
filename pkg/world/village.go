@@ -1,0 +1,476 @@
+package world
+
+// VillageGrid handles deterministic village placement on a sparse grid.
+// Every VILLAGE_CELL_SIZE blocks in X and Z forms a grid cell; each cell
+// independently rolls whether it contains a village center.
+const villageCellSize = 96
+
+// VillageGrid carries the world seed used for per-cell rolls.
+type VillageGrid struct {
+	seed int64
+}
+
+// NewVillageGrid creates a VillageGrid for the given world seed.
+func NewVillageGrid(seed int64) *VillageGrid {
+	return &VillageGrid{seed: seed}
+}
+
+// cellHash returns a deterministic value in [0, mod) for cell (cx, cz).
+func (v *VillageGrid) cellHash(cx, cz, mod int64) int64 {
+	const k1 int64 = -7046029254386353131 // splitmix64 step 1
+	const k2 int64 = -4265267296055464877 // splitmix64 step 2
+	h := v.seed ^ (cx * k1) ^ (cz * 7823434773480878946)
+	h ^= h >> 33
+	h *= k1
+	h ^= h >> 27
+	h *= k2
+	h ^= h >> 31
+	if h < 0 {
+		h = -h
+	}
+	return h % mod
+}
+
+// villageCenter returns the world-space (x, z) center of a village in grid cell
+// (cellX, cellZ), and ok=true if that cell contains a village (25% chance).
+func (v *VillageGrid) villageCenter(cellX, cellZ int) (wx, wz int, ok bool) {
+	cx := int64(cellX)
+	cz := int64(cellZ)
+	// ~25% of cells get a village
+	if v.cellHash(cx, cz, 4) != 0 {
+		return 0, 0, false
+	}
+	// Offset within the cell so villages aren't always at the corner
+	ox := int(v.cellHash(cx^0xDEAD, cz^0xBEEF, int64(villageCellSize-20))) + 10
+	oz := int(v.cellHash(cx^0xCAFE, cz^0xF00D, int64(villageCellSize-20))) + 10
+	return cellX*villageCellSize + ox, cellZ*villageCellSize + oz, true
+}
+
+// divFloor returns a / b, rounding towards negative infinity.
+func divFloor(a, b int) int {
+	if a < 0 && a%b != 0 {
+		return a/b - 1
+	}
+	return a / b
+}
+
+// generateVillage writes village structures into sections for chunk (chunkX, chunkZ).
+// surfY is the flat surface Y (the grass layer). All coordinates stay inside
+// the section array exactly like generateTrees does.
+func (v *VillageGrid) generateVillage(chunkX, chunkZ, surfY int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+	// Chunk world-space bounds
+	minWX := chunkX * 16
+	minWZ := chunkZ * 16
+	maxWX := minWX + 15
+	maxWZ := minWZ + 15
+
+	// Village influence radius (structures can reach this many blocks from center)
+	// Increased to 48 to capture large halls and branching paths.
+	const radius = 48
+
+	// Determine which grid cells could have villages whose structures overlap this chunk.
+	// We use floor division to ensure correct mapping in all coordinate quadrants.
+	cellMinX := divFloor(minWX-radius, villageCellSize)
+	cellMaxX := divFloor(maxWX+radius, villageCellSize)
+	cellMinZ := divFloor(minWZ-radius, villageCellSize)
+	cellMaxZ := divFloor(maxWZ+radius, villageCellSize)
+
+	for cx := cellMinX; cx <= cellMaxX; cx++ {
+		for cz := cellMinZ; cz <= cellMaxZ; cz++ {
+			vx, vz, ok := v.villageCenter(cx, cz)
+			if !ok {
+				continue
+			}
+			v.buildVillage(vx, vz, surfY, chunkX, chunkZ, sections)
+		}
+	}
+}
+
+// IsInVillage returns true if (wx, wz) is within the influence area of a village.
+func (v *VillageGrid) IsInVillage(wx, wz int) bool {
+	const influenceRadius = 40
+	cellMinX := divFloor(wx-influenceRadius, villageCellSize)
+	cellMaxX := divFloor(wx+influenceRadius, villageCellSize)
+	cellMinZ := divFloor(wz-influenceRadius, villageCellSize)
+	cellMaxZ := divFloor(wz+influenceRadius, villageCellSize)
+
+	for cx := cellMinX; cx <= cellMaxX; cx++ {
+		for cz := cellMinZ; cz <= cellMaxZ; cz++ {
+			vx, vz, ok := v.villageCenter(cx, cz)
+			if !ok {
+				continue
+			}
+			dx := wx - vx
+			dz := wz - vz
+			if dx >= -influenceRadius && dx <= influenceRadius && dz >= -influenceRadius && dz <= influenceRadius {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// setBlock is a helper that writes block state into the sections array, clamping
+// to valid section / local coordinates within the chunk.
+func setBlock(lx, y, lz int, state uint16, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+	if y < 0 || y > 255 || lx < 0 || lx > 15 || lz < 0 || lz > 15 {
+		return
+	}
+	sec := y / 16
+	sy := y % 16
+	sections[sec][(sy*16+lz)*16+lx] = state
+}
+
+// worldToLocal converts a world X or Z to the local coordinate within chunkX/chunkZ.
+// Returns the local coord and whether it falls within [0,15].
+func worldToLocal(world, chunkOrigin int) (int, bool) {
+	l := world - chunkOrigin
+	return l, l >= 0 && l <= 15
+}
+
+// buildVillage places all structures for a village centered at (vx, vz, surfY)
+// into the sections array, writing only blocks that fall within this chunk.
+func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+	originX := chunkX * 16
+	originZ := chunkZ * 16
+
+	// Block IDs (state = id << 4)
+	const (
+		air        = 0
+		log        = 17 << 4 // oak log
+		cobble     = 4 << 4  // cobblestone
+		planks     = 5 << 4  // oak planks
+		gravel     = 13 << 4 // gravel (path)
+		glass      = 20 << 4 // glass pane (window)
+		fence      = 85 << 4 // oak fence
+		stoneBrick = 98 << 4 // stone bricks (well walls)
+		waterSrc   = 9 << 4  // water (stationary)
+		torch      = 50 << 4 // torch
+		slab       = 44 << 4 // stone slab
+		oakStairs  = 53 << 4 // oak stairs
+		woodenDoor = 64 << 4 // wooden door
+		farmland   = 60 << 4 // farmland
+		wheat      = 59 << 4 // wheat (id 59)
+		dandelion  = 37 << 4 // dandelion flower
+		poppy      = 38 << 4 // poppy flower
+	)
+
+	placeBlock := func(wx, y, wz int, state uint16) {
+		lx := wx - originX
+		lz := wz - originZ
+		setBlock(lx, y, lz, state, sections)
+	}
+
+	// isSafeToDecorate returns true if the block at (wx, y, wz) is air or gravel.
+	isSafeToDecorate := func(wx, y, wz int) bool {
+		lx := wx - originX
+		lz := wz - originZ
+		if y < 0 || y > 255 || lx < 0 || lx > 15 || lz < 0 || lz > 15 {
+			return false
+		}
+		sec := y / 16
+		sy := y % 16
+		currentState := sections[sec][(sy*16+lz)*16+lx]
+		return (currentState >> 4) == 0 || (currentState >> 4) == 13 // Air (0) or Gravel (13)
+	}
+
+	placeDecoration := func(wx, y, wz int, state uint16) {
+		if isSafeToDecorate(wx, y, wz) {
+			placeBlock(wx, y, wz, state)
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// 1. Gravel paths: Main cross + secondary branches
+	// ------------------------------------------------------------------
+	const pathLen = 32
+	for d := -pathLen; d <= pathLen; d++ {
+		for w := -1; w <= 1; w++ {
+			// Main X axis
+			placeBlock(vx+d, surfY, vz+w, gravel)
+			// Main Z axis
+			placeBlock(vx+w, surfY, vz+d, gravel)
+		}
+	}
+	// Secondary branches
+	for d := 8; d <= 24; d++ {
+		for w := -1; w <= 1; w++ {
+			// Branch at X=16, going Z
+			if d >= 16 {
+				placeBlock(vx+16+w, surfY, vz+d, gravel)
+				placeBlock(vx-16+w, surfY, vz-d, gravel)
+			}
+			// Branch at Z=16, going X
+			if d >= 16 {
+				placeBlock(vx+d, surfY, vz+16+w, gravel)
+				placeBlock(vx-d, surfY, vz-16+w, gravel)
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// 2. Well (at center)
+	// ------------------------------------------------------------------
+	for dx := -1; dx <= 1; dx++ {
+		for dz := -1; dz <= 1; dz++ {
+			isEdge := dx == -1 || dx == 1 || dz == -1 || dz == 1
+			placeBlock(vx+dx, surfY, vz+dz, stoneBrick)
+			if isEdge {
+				placeBlock(vx+dx, surfY+1, vz+dz, stoneBrick)
+				placeBlock(vx+dx, surfY+2, vz+dz, stoneBrick)
+			}
+		}
+	}
+	placeBlock(vx, surfY+1, vz, waterSrc)
+	for dx := -1; dx <= 1; dx++ {
+		for dz := -1; dz <= 1; dz++ {
+			placeBlock(vx+dx, surfY+3, vz+dz, slab)
+		}
+	}
+
+	// ------------------------------------------------------------------
+	// 3. Structures: Large Hall, Houses, and Farms
+	// ------------------------------------------------------------------
+	// Large Hall (North) - Shifted to vx-3 so door (hx+3) is at vx center path
+	v.buildLargeHall(vx-3, vz+22, surfY, placeBlock, log, planks, cobble, glass, torch, oakStairs, woodenDoor, air)
+
+	// Small Houses
+	v.buildHouse(vx+12, vz+6, surfY, 0, placeBlock, log, planks, cobble, glass, fence, torch, oakStairs, woodenDoor, air)
+	v.buildHouse(vx-12, vz-6, surfY, 1, placeBlock, log, planks, cobble, glass, fence, torch, oakStairs, woodenDoor, air)
+	v.buildHouse(vx+22, vz-12, surfY, 2, placeBlock, log, planks, cobble, glass, fence, torch, oakStairs, woodenDoor, air)
+
+	// Farms
+	v.buildFarm(vx-22, vz+12, surfY, placeBlock, log, waterSrc, farmland, wheat)
+	v.buildFarm(vx+6, vz-22, surfY, placeBlock, log, waterSrc, farmland, wheat)
+
+	// ------------------------------------------------------------------
+	// 4. Decorations: Flowers & Lamp Posts
+	// ------------------------------------------------------------------
+	// Flowers randomly around structures
+	for i := -30; i <= 30; i += 7 {
+		for j := -30; j <= 30; j += 7 {
+			h := int64(i*131 + j*17)
+			if h%5 == 0 {
+				flower := dandelion
+				if h%10 == 0 {
+					flower = poppy
+				}
+				placeDecoration(vx+i, surfY+1, vz+j, uint16(flower))
+			}
+		}
+	}
+
+	// Lamp posts along the main paths
+	for _, dist := range []int{10, 20, 30} {
+		for _, axis := range [][2]int{{dist, 2}, {-dist, -2}, {2, dist}, {-2, -dist}} {
+			px, pz := vx+axis[0], vz+axis[1]
+			// 3-high fence post
+			placeDecoration(px, surfY+1, pz, fence)
+			placeDecoration(px, surfY+2, pz, fence)
+			placeDecoration(px, surfY+3, pz, fence)
+			// Torch on top (meta 5 = upright on top of block)
+			placeDecoration(px, surfY+4, pz, torch|5)
+		}
+	}
+}
+
+// buildFarm creates a 7x7 farm with a water trench in the middle.
+func (v *VillageGrid) buildFarm(fx, fz, surfY int, place func(wx, y, wz int, state uint16), log, water, farmland, wheat uint16) {
+	for dx := -3; dx <= 3; dx++ {
+		for dz := -3; dz <= 3; dz++ {
+			isBorder := dx == -3 || dx == 3 || dz == -3 || dz == 3
+			if isBorder {
+				place(fx+dx, surfY, fz+dz, log)
+			} else if dx == 0 {
+				place(fx+dx, surfY, fz+dz, water)
+			} else {
+				place(fx+dx, surfY, fz+dz, farmland)
+				place(fx+dx, surfY+1, fz+dz, wheat|7) // fully grown wheat (meta 7)
+			}
+		}
+	}
+}
+
+// buildLargeHall creates a 7x9 building with a solid symmetrical facade.
+func (v *VillageGrid) buildLargeHall(hx, hz, surfY int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, torch, stairs, door, air uint16) {
+	const w, l = 7, 9
+	const h = 4
+	for dx := 0; dx < w; dx++ {
+		for dz := 0; dz < l; dz++ {
+			place(hx+dx, surfY, hz+dz, cobble) // foundation
+			isCorner := (dx == 0 || dx == w-1) && (dz == 0 || dz == l-1)
+			isWallX := dx == 0 || dx == w-1
+			isWallZ := dz == 0 || dz == l-1
+			isWall := isWallX || isWallZ
+
+			for dy := 1; dy <= h; dy++ {
+				if isCorner {
+					place(hx+dx, surfY+dy, hz+dz, log)
+				} else if isWall {
+					// Default to planks
+					block := planks
+
+					// Symmetrical End Wall (Door Wall) at dz=l-1
+					if dz == l-1 {
+						isDoor := dx == 3 && (dy == 1 || dy == 2)
+						isWindow := (dx == 1 || dx == 5) && dy == 2
+						if isDoor {
+							if dy == 1 {
+								block = door | 1 // Bottom, North
+							} else {
+								block = door | 8 // Top
+							}
+						} else if isWindow {
+							block = glass
+						}
+					} else if dz == 0 {
+						// Back wall: symmetrical windows
+						if (dx == 2 || dx == 4) && dy == 2 {
+							block = glass
+						}
+					} else if isWallX {
+						// Side walls: triple symmetrical windows
+						if (dz == 2 || dz == 4 || dz == 6) && dy == 2 {
+							block = glass
+						}
+					}
+					place(hx+dx, surfY+dy, hz+dz, block)
+				} else {
+					place(hx+dx, surfY+dy, hz+dz, air)
+				}
+			}
+		}
+	}
+
+	// Pitched Roof (North-South oriented)
+	for dz := -1; dz <= l; dz++ {
+		// Slope coverage logic (w=7)
+		place(hx-1, surfY+h+1, hz+dz, stairs|0) // Eaves
+		place(hx+w, surfY+h+1, hz+dz, stairs|1)
+
+		place(hx, surfY+h+2, hz+dz, stairs|0)
+		place(hx+w-1, surfY+h+2, hz+dz, stairs|1)
+
+		place(hx+1, surfY+h+3, hz+dz, stairs|0)
+		place(hx+w-2, surfY+h+3, hz+dz, stairs|1)
+
+		place(hx+2, surfY+h+4, hz+dz, stairs|0)
+		place(hx+w-3, surfY+h+4, hz+dz, stairs|1)
+
+		place(hx+3, surfY+h+5, hz+dz, planks) // Ridge
+
+		// Gables
+		if dz == 0 || dz == l-1 {
+			for dy := 1; dy <= 4; dy++ {
+				for dx := 0; dx < w; dx++ {
+					if (dy == 1) || (dy == 2 && dx >= 1 && dx <= 5) || (dy == 3 && dx >= 2 && dx <= 4) || (dy == 4 && dx == 3) {
+						place(hx+dx, surfY+h+dy, hz+dz, planks)
+					}
+				}
+			}
+		}
+	}
+	place(hx+3, surfY+3, hz+l, torch)
+}
+
+// buildHouse places a 5x5 plank house with a solid symmetrical facade.
+func (v *VillageGrid) buildHouse(hx, hz, surfY, houseIdx int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, fence, torch, stairs, door, air uint16) {
+	const w = 5
+	const h = 3
+	for dx := 0; dx < w; dx++ {
+		for dz := 0; dz < w; dz++ {
+			place(hx+dx, surfY, hz+dz, cobble)
+			isCorner := (dx == 0 || dx == w-1) && (dz == 0 || dz == w-1)
+			isWallX := dx == 0 || dx == w-1
+			isWallZ := dz == 0 || dz == w-1
+			isWall := isWallX || isWallZ
+
+			for dy := 1; dy <= h; dy++ {
+				if isCorner {
+					place(hx+dx, surfY+dy, hz+dz, log)
+				} else if isWall {
+					block := planks
+
+					// Door side depends on houseIdx
+					isFrontWall := (houseIdx%2 == 0 && dz == w-1) || (houseIdx%2 == 1 && dz == 0)
+					if isFrontWall {
+						isDoor := dx == 2 && (dy == 1 || dy == 2)
+						isWindow := (dx == 1 || dx == 3) && dy == 2
+						if isDoor {
+							meta := uint16(1) // North
+							if houseIdx%2 == 1 {
+								meta = 3 // South
+							}
+							if dy == 1 {
+								block = door | meta
+							} else {
+								block = door | 8
+							}
+						} else if isWindow {
+							block = glass
+						}
+					} else {
+						// Other walls: centered window
+						if dy == 2 {
+							if (isWallX && dz == 2) || (isWallZ && dx == 2) {
+								block = glass
+							}
+						}
+					}
+					place(hx+dx, surfY+dy, hz+dz, block)
+				} else {
+					place(hx+dx, surfY+dy, hz+dz, air)
+				}
+			}
+		}
+	}
+
+	// Pitched Roof
+	if houseIdx%2 == 0 {
+		// North-South peak
+		for dx := -1; dx <= w; dx++ {
+			place(hx+dx, surfY+h+1, hz-1, stairs|2)
+			place(hx+dx, surfY+h+1, hz+w, stairs|3)
+			place(hx+dx, surfY+h+2, hz, stairs|2)
+			place(hx+dx, surfY+h+2, hz+w-1, stairs|3)
+			place(hx+dx, surfY+h+3, hz+1, stairs|2)
+			place(hx+dx, surfY+h+3, hz+3, stairs|3)
+			place(hx+dx, surfY+h+4, hz+2, planks)
+
+			if dx == 0 || dx == w-1 {
+				for dy := 1; dy <= 3; dy++ {
+					for dz := 1; dz < w-1; dz++ {
+						if (dy == 1) || (dy == 2 && dz >= 1 && dz <= 3) || (dy == 3 && dz == 2) {
+							place(hx+dx, surfY+h+dy, hz+dz, planks)
+						}
+					}
+					place(hx+dx, surfY+h+1, hz, planks)
+					place(hx+dx, surfY+h+1, hz+w-1, planks)
+				}
+			}
+		}
+	} else {
+		// East-West peak
+		for dz := -1; dz <= w; dz++ {
+			place(hx-1, surfY+h+1, hz+dz, stairs|0)
+			place(hx+w, surfY+h+1, hz+dz, stairs|1)
+			place(hx, surfY+h+2, hz+dz, stairs|0)
+			place(hx+w-1, surfY+h+2, hz+dz, stairs|1)
+			place(hx+1, surfY+h+3, hz+dz, stairs|0)
+			place(hx+3, surfY+h+3, hz+dz, stairs|1)
+			place(hx+2, surfY+h+4, hz+dz, planks)
+
+			if dz == 0 || dz == w-1 {
+				for dy := 1; dy <= 3; dy++ {
+					for dx := 1; dx < w-1; dx++ {
+						if (dy == 1) || (dy == 2 && dx >= 1 && dx <= 3) || (dy == 3 && dx == 2) {
+							place(hx+dx, surfY+h+dy, hz+dz, planks)
+						}
+					}
+					place(hx, surfY+h+1, hz+dz, planks)
+					place(hx+w-1, surfY+h+1, hz+dz, planks)
+				}
+			}
+		}
+	}
+}

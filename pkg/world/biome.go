@@ -9,6 +9,7 @@ type Biome struct {
 	BaseHeight      int     // base terrain height in blocks
 	HeightVariation float64 // amplitude of height noise
 	TreeDensity     float64 // 0.0 = none, higher = more trees
+	BoulderDensity  float64 // 0.0 = none, chance per column
 	HasSnow         bool
 }
 
@@ -26,7 +27,8 @@ var (
 		SurfaceBlock: 2 << 4, // grass
 		FillerBlock:  3 << 4, // dirt
 		BaseHeight:   66, HeightVariation: 12,
-		TreeDensity: 0.003,
+		TreeDensity: 0.006,
+		BoulderDensity: 0.03,
 	}
 	BiomeDesert = &Biome{
 		ID: 2, Name: "Desert",
@@ -34,27 +36,48 @@ var (
 		FillerBlock:  24 << 4, // sandstone
 		BaseHeight:   64, HeightVariation: 10,
 		TreeDensity: 0,
+		BoulderDensity: 0.02, // desert rocks
 	}
 	BiomeExtremeHills = &Biome{
 		ID: 3, Name: "Extreme Hills",
 		SurfaceBlock: 2 << 4, // grass
 		FillerBlock:  1 << 4, // stone
 		BaseHeight:   72, HeightVariation: 50,
-		TreeDensity: 0.004,
+		TreeDensity: 0.015,
+		BoulderDensity: 0.08,
 	}
 	BiomeForest = &Biome{
 		ID: 4, Name: "Forest",
 		SurfaceBlock: 2 << 4, // grass
 		FillerBlock:  3 << 4, // dirt
 		BaseHeight:   68, HeightVariation: 14,
-		TreeDensity: 0.025,
+		TreeDensity: 0.05,
+		BoulderDensity: 0.04,
+	}
+	BiomeJungle = &Biome{
+		ID: 21, Name: "Jungle",
+		SurfaceBlock: 2 << 4, // grass
+		FillerBlock:  3 << 4, // dirt
+		BaseHeight:   70, HeightVariation: 20,
+		TreeDensity: 0.12,
+		BoulderDensity: 0.02,
+	}
+	BiomeDarkForest = &Biome{
+		ID: 29, Name: "Dark Forest",
+		SurfaceBlock: 2 << 4, // grass
+		FillerBlock:  3 << 4, // dirt
+		BaseHeight:   68, HeightVariation: 10,
+		TreeDensity: 0.25,
+		BoulderDensity: 0.02,
 	}
 	BiomeSnowyTundra = &Biome{
 		ID: 12, Name: "Snowy Tundra",
 		SurfaceBlock: 80 << 4, // snow block
 		FillerBlock:  3 << 4,  // dirt
 		BaseHeight:   66, HeightVariation: 8,
-		TreeDensity: 0, HasSnow: true,
+		TreeDensity: 0.004,
+		BoulderDensity: 0.02,
+		HasSnow: true,
 	}
 )
 
@@ -65,6 +88,8 @@ var allBiomes = []*Biome{
 	BiomeDesert,
 	BiomeExtremeHills,
 	BiomeForest,
+	BiomeJungle,
+	BiomeDarkForest,
 	BiomeSnowyTundra,
 }
 
@@ -89,20 +114,32 @@ func BiomeAt(tempNoise, rainNoise *Perlin, worldX, worldZ int) *Biome {
 	case temp < 0.25:
 		return BiomeSnowyTundra
 	case temp < 0.45:
-		if rain > 0.5 {
+		if rain > 0.7 {
+			return BiomeDarkForest
+		}
+		if rain > 0.4 {
 			return BiomeForest
 		}
 		return BiomePlains
-	case temp < 0.7:
-		if rain > 0.6 {
+	case temp < 0.75:
+		if rain > 0.8 {
+			return BiomeJungle
+		}
+		if rain > 0.5 {
+			return BiomeDarkForest
+		}
+		if rain > 0.3 {
 			return BiomeForest
 		}
-		if rain < 0.25 {
+		if rain < 0.2 {
 			return BiomeExtremeHills
 		}
 		return BiomePlains
 	default:
-		if rain < 0.4 {
+		if rain > 0.7 {
+			return BiomeJungle
+		}
+		if rain < 0.3 {
 			return BiomeDesert
 		}
 		return BiomePlains

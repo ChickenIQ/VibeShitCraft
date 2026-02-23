@@ -74,21 +74,26 @@ func TestBlockAtBoundary(t *testing.T) {
 	}
 }
 
-func TestFlatChunksConsistent(t *testing.T) {
-	g := NewGenerator(42)
+func TestGeneratorDeterminismAcrossChunks(t *testing.T) {
+	// The same seed must produce byte-for-byte identical output for any given chunk,
+	// regardless of which other chunks were generated first.
+	g1 := NewGenerator(42)
+	g2 := NewGenerator(42)
 
-	data1, mask1 := g.GenerateChunkData(0, 0)
-	data2, mask2 := g.GenerateChunkData(10, 10)
-
-	if mask1 != mask2 {
-		t.Errorf("flat world: bitmask differs between chunks: 0x%04x vs 0x%04x", mask1, mask2)
-	}
-	if len(data1) != len(data2) {
-		t.Fatalf("flat world: data length differs: %d vs %d", len(data1), len(data2))
-	}
-	for i := range data1 {
-		if data1[i] != data2[i] {
-			t.Fatalf("flat world: chunk data differs at byte %d", i)
+	for _, coord := range [][2]int{{0, 0}, {10, 10}, {-3, 7}, {0, -5}} {
+		cx, cz := coord[0], coord[1]
+		d1, m1 := g1.GenerateChunkData(cx, cz)
+		d2, m2 := g2.GenerateChunkData(cx, cz)
+		if m1 != m2 {
+			t.Errorf("chunk (%d,%d): bitmask mismatch: 0x%04x vs 0x%04x", cx, cz, m1, m2)
+		}
+		if len(d1) != len(d2) {
+			t.Fatalf("chunk (%d,%d): data length mismatch: %d vs %d", cx, cz, len(d1), len(d2))
+		}
+		for i := range d1 {
+			if d1[i] != d2[i] {
+				t.Fatalf("chunk (%d,%d): data differs at byte %d", cx, cz, i)
+			}
 		}
 	}
 }
