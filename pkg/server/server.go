@@ -2785,8 +2785,8 @@ func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
 			}
 
 			for _, e := range entities {
-				// Skip recently spawned items (2 second pickup delay)
-				if time.Since(e.SpawnTime) < 2*time.Second {
+				// Skip recently spawned items (1 second pickup delay)
+				if time.Since(e.SpawnTime) < 1*time.Second {
 					continue
 				}
 
@@ -2830,7 +2830,7 @@ func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
 						} else {
 							s.mu.Unlock()
 						}
-						break // only pick up one item per tick per player for simplicity
+						continue
 					}
 					player.mu.Unlock()
 				}
