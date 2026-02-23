@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"net"
 	"testing"
 	"time"
@@ -185,4 +186,56 @@ func TestCreativeNoDamage(t *testing.T) {
 	if target.Health != 20.0 {
 		t.Errorf("target health = %f, want 20.0 (creative mode)", target.Health)
 	}
+}
+
+func TestHealthRegeneration(t *testing.T) {
+	s := New(DefaultConfig())
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	player := &Player{
+		EntityID: 1,
+		Username: "Player",
+		Health:   10.0,
+		IsDead:   false,
+		GameMode: GameModeSurvival,
+		Conn:     c1,
+	}
+	s.players[player.EntityID] = player
+
+	// Capture packets sent to player
+	receivedHealth := make(chan float32, 1)
+	go func() {
+		for {
+			pkt, err := protocol.ReadPacket(c2)
+			if err != nil {
+				return
+			}
+			if pkt.ID == 0x06 { // Update Health
+				r := bytes.NewReader(pkt.Data)
+				h, _ := protocol.ReadFloat32(r)
+				receivedHealth <- h
+			}
+		}
+	}()
+
+	stopRegen := make(chan struct{})
+	go s.regenerationLoop(player, stopRegen)
+	defer close(stopRegen)
+
+	select {
+	case h := <-receivedHealth:
+		if h != 11.0 {
+			t.Errorf("received health = %f, want 11.0", h)
+		}
+	case <-time.After(5 * time.Second):
+		t.Error("timed out waiting for health regeneration")
+	}
+
+	player.mu.Lock()
+	if player.Health != 11.0 {
+		t.Errorf("player health = %f, want 11.0", player.Health)
+	}
+	player.mu.Unlock()
 }

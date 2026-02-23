@@ -144,6 +144,7 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		glass      = 20 << 4 // glass pane (window)
 		fence      = 85 << 4 // oak fence
 		stoneBrick = 98 << 4 // stone bricks (well walls)
+		cobbleWall = 139 << 4 // cobblestone wall
 		waterSrc   = 9 << 4  // water (stationary)
 		torch      = 50 << 4 // torch
 		slab       = 44 << 4 // stone slab
@@ -209,22 +210,40 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 	}
 
 	// ------------------------------------------------------------------
-	// 2. Well (at center)
+	// 2. Well (at center) - 4x4 Design with Slabs and Pillars
 	// ------------------------------------------------------------------
-	for dx := -1; dx <= 1; dx++ {
-		for dz := -1; dz <= 1; dz++ {
-			isEdge := dx == -1 || dx == 1 || dz == -1 || dz == 1
-			placeBlock(vx+dx, surfY, vz+dz, stoneBrick)
-			if isEdge {
-				placeBlock(vx+dx, surfY+1, vz+dz, stoneBrick)
-				placeBlock(vx+dx, surfY+2, vz+dz, stoneBrick)
-			}
+	// Gravel foundation/path around the well (6x6)
+	for dx := -3; dx <= 2; dx++ {
+		for dz := -3; dz <= 2; dz++ {
+			placeBlock(vx+dx, surfY, vz+dz, gravel)
 		}
 	}
-	placeBlock(vx, surfY+1, vz, waterSrc)
-	for dx := -1; dx <= 1; dx++ {
-		for dz := -1; dz <= 1; dz++ {
-			placeBlock(vx+dx, surfY+3, vz+dz, slab)
+
+	for dx := -2; dx <= 1; dx++ {
+		for dz := -2; dz <= 1; dz++ {
+			isCorner := (dx == -2 || dx == 1) && (dz == -2 || dz == 1)
+			isInner := (dx == -1 || dx == 0) && (dz == -1 || dz == 0)
+
+			// Base layer (4x4 stone brick)
+			placeBlock(vx+dx, surfY+1, vz+dz, stoneBrick)
+
+			// Second layer: Pillars at corners, stone bricks at edges, water in middle
+			if isCorner {
+				// 3-high cobblestone pillars
+				placeBlock(vx+dx, surfY+2, vz+dz, cobbleWall)
+				placeBlock(vx+dx, surfY+3, vz+dz, cobbleWall)
+				placeBlock(vx+dx, surfY+4, vz+dz, cobbleWall)
+			} else if isInner {
+				// 2x2 Water center
+				placeBlock(vx+dx, surfY+1, vz+dz, stoneBrick) // floor of well
+				placeBlock(vx+dx, surfY+2, vz+dz, waterSrc)
+			} else {
+				// Edge blocks (stone bricks)
+				placeBlock(vx+dx, surfY+2, vz+dz, stoneBrick)
+			}
+
+			// Roof (4x4 stone slabs)
+			placeBlock(vx+dx, surfY+5, vz+dz, slab)
 		}
 	}
 

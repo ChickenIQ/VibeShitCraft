@@ -90,7 +90,7 @@ func TestAddItemToInventory(t *testing.T) {
 	}
 
 	// Add first item - should go to hotbar slot 36
-	slot, ok := addItemToInventory(player, 3, 1)
+	slot, ok := addItemToInventory(player, 3, 0, 1)
 	if !ok {
 		t.Fatal("addItemToInventory failed for first item")
 	}
@@ -102,7 +102,7 @@ func TestAddItemToInventory(t *testing.T) {
 	}
 
 	// Add same item again - should stack in slot 36
-	slot, ok = addItemToInventory(player, 3, 1)
+	slot, ok = addItemToInventory(player, 3, 0, 1)
 	if !ok {
 		t.Fatal("addItemToInventory failed for stacking")
 	}
@@ -114,7 +114,7 @@ func TestAddItemToInventory(t *testing.T) {
 	}
 
 	// Add different item - should go to next empty hotbar slot 37
-	slot, ok = addItemToInventory(player, 4, 1)
+	slot, ok = addItemToInventory(player, 4, 0, 1)
 	if !ok {
 		t.Fatal("addItemToInventory failed for different item")
 	}
@@ -135,7 +135,7 @@ func TestAddItemToInventoryFull(t *testing.T) {
 	}
 
 	// Try to add a different item - should fail
-	_, ok := addItemToInventory(player, 3, 1)
+	_, ok := addItemToInventory(player, 3, 0, 1)
 	if ok {
 		t.Error("addItemToInventory should fail when inventory is full")
 	}
@@ -151,7 +151,7 @@ func TestAddItemStackOverflow(t *testing.T) {
 	player.Inventory[36] = Slot{ItemID: 3, Count: 63}
 
 	// Add 1 more - should stack to 64
-	slot, ok := addItemToInventory(player, 3, 1)
+	slot, ok := addItemToInventory(player, 3, 0, 1)
 	if !ok {
 		t.Fatal("addItemToInventory failed for stacking to 64")
 	}
@@ -163,7 +163,7 @@ func TestAddItemStackOverflow(t *testing.T) {
 	}
 
 	// Slot is now full (64), adding more of same item should go to next slot
-	slot, ok = addItemToInventory(player, 3, 1)
+	slot, ok = addItemToInventory(player, 3, 0, 1)
 	if !ok {
 		t.Fatal("addItemToInventory failed for new slot after full stack")
 	}

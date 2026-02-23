@@ -68,20 +68,38 @@ func FlatWorldBlock(y int32) uint16 {
 	}
 }
 
-// BlockToItemID returns the item ID that should be dropped when a block is broken.
-// Returns -1 if the block should not drop anything.
-func BlockToItemID(blockState uint16) int16 {
+// BlockToItemID returns the item ID and damage (metadata) that should be dropped when a block is broken.
+// Returns -1 for itemID if the block should not drop anything.
+func BlockToItemID(blockState uint16) (int16, int16) {
 	blockID := blockState >> 4
+	metadata := int16(blockState & 0x0F)
+
 	switch blockID {
 	case 0: // air
-		return -1
+		return -1, 0
 	case 7: // bedrock
-		return -1
+		return -1, 0
+	case 8, 9, 10, 11: // water/lava
+		return -1, 0
+	case 20, 95, 102: // glass, glass panes
+		return -1, 0
 	case 2: // grass block -> drops dirt
-		return 3
+		return 3, 0
 	case 1: // stone -> drops cobblestone
-		return 4
+		return 4, 0
+	case 17, 162: // logs -> drop themselves
+		return int16(blockID), metadata
+	case 18, 161: // leaves -> chance to drop saplings, but for now drop nothing
+		return -1, 0
+	case 31: // tall grass -> drops nothing (unless shears)
+		return -1, 0
+	case 59: // wheat -> drops wheat item (ID 296)
+		return 296, 0
+	case 60: // farmland -> drops dirt
+		return 3, 0
+	case 64: // wooden door block -> drops oak door item (ID 324)
+		return 324, 0
 	default:
-		return int16(blockID)
+		return int16(blockID), metadata
 	}
 }

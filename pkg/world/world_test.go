@@ -77,21 +77,24 @@ func TestWorldGetModifications(t *testing.T) {
 func TestBlockToItemID(t *testing.T) {
 	tests := []struct {
 		blockState uint16
-		want       int16
+		wantID     int16
+		wantDamage int16
 	}{
-		{0, -1},          // air -> no drop
-		{7 << 4, -1},     // bedrock -> no drop
-		{2 << 4, 3},      // grass -> dirt
-		{1 << 4, 4},      // stone -> cobblestone
-		{3 << 4, 3},      // dirt -> dirt
-		{4 << 4, 4},      // cobblestone -> cobblestone
-		{17 << 4, 17},    // oak log -> oak log
+		{0, -1, 0},             // air -> no drop
+		{7 << 4, -1, 0},        // bedrock -> no drop
+		{2 << 4, 3, 0},         // grass -> dirt
+		{1 << 4, 4, 0},         // stone -> cobblestone
+		{3 << 4, 3, 0},         // dirt -> dirt
+		{4 << 4, 4, 0},         // cobblestone -> cobblestone
+		{17 << 4, 17, 0},       // oak log -> oak log
+		{17<<4 | 1, 17, 1},     // spruce log -> spruce log
+		{162<<4 | 1, 162, 1},   // dark oak log -> dark oak log
 	}
 
 	for _, tt := range tests {
-		got := BlockToItemID(tt.blockState)
-		if got != tt.want {
-			t.Errorf("BlockToItemID(%d) = %d, want %d", tt.blockState, got, tt.want)
+		gotID, gotDamage := BlockToItemID(tt.blockState)
+		if gotID != tt.wantID || gotDamage != tt.wantDamage {
+			t.Errorf("BlockToItemID(%d) = (%d, %d), want (%d, %d)", tt.blockState, gotID, gotDamage, tt.wantID, tt.wantDamage)
 		}
 	}
 }

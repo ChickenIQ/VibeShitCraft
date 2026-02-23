@@ -374,8 +374,13 @@ func (s *Server) handlePlay(player *Player) {
 	stopKeepAlive := make(chan struct{})
 	go s.keepAliveLoop(player, stopKeepAlive)
 
+	// Start health regeneration loop
+	stopRegen := make(chan struct{})
+	go s.regenerationLoop(player, stopRegen)
+
 	defer func() {
 		close(stopKeepAlive)
+		close(stopRegen)
 		s.mu.Lock()
 		delete(s.players, player.EntityID)
 		s.mu.Unlock()
@@ -398,6 +403,30 @@ func (s *Server) handlePlay(player *Player) {
 		}
 
 		s.handlePlayPacket(player, pkt)
+	}
+}
+
+func (s *Server) regenerationLoop(player *Player, stop chan struct{}) {
+	ticker := time.NewTicker(4 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			player.mu.Lock()
+			if player.Health < 20.0 && !player.IsDead && player.GameMode == GameModeSurvival {
+				player.Health += 1.0
+				if player.Health > 20.0 {
+					player.Health = 20.0
+				}
+				player.mu.Unlock()
+				s.sendHealth(player)
+			} else {
+				player.mu.Unlock()
+			}
+		}
 	}
 }
 
@@ -934,13 +963,13 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 	}
 
 	// Give item to player
-	itemID := world.BlockToItemID(blockState)
+	itemID, damage := world.BlockToItemID(blockState)
 	if itemID < 0 {
 		return
 	}
 
 	player.mu.Lock()
-	slotIndex, ok := addItemToInventory(player, itemID, 1)
+	slotIndex, ok := addItemToInventory(player, itemID, damage, 1)
 	if ok {
 		slot := player.Inventory[slotIndex]
 		pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
@@ -953,7 +982,7 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 	player.mu.Unlock()
 
 	if ok {
-		log.Printf("Player %s broke block %d at (%d, %d, %d), received item %d", player.Username, blockID, x, y, z, itemID)
+		log.Printf("Player %s broke block %d at (%d, %d, %d), received item %d:%d", player.Username, blockID, x, y, z, itemID, damage)
 	}
 }
 
@@ -999,17 +1028,17 @@ func (s *Server) broadcastBlockBreakEffect(breaker *Player, x, y, z int32, block
 // addItemToInventory finds a suitable slot and adds the item to the player's inventory.
 // Returns the slot index and true if successful, or -1 and false if inventory is full.
 // Must be called with player.mu held.
-func addItemToInventory(player *Player, itemID int16, count byte) (int, bool) {
+func addItemToInventory(player *Player, itemID int16, damage int16, count byte) (int, bool) {
 	// Try to stack in hotbar (slots 36-44)
 	for i := 36; i <= 44; i++ {
-		if player.Inventory[i].ItemID == itemID && player.Inventory[i].Count+count <= 64 {
+		if player.Inventory[i].ItemID == itemID && player.Inventory[i].Damage == damage && player.Inventory[i].Count+count <= 64 {
 			player.Inventory[i].Count += count
 			return i, true
 		}
 	}
 	// Try to stack in main inventory (slots 9-35)
 	for i := 9; i <= 35; i++ {
-		if player.Inventory[i].ItemID == itemID && player.Inventory[i].Count+count <= 64 {
+		if player.Inventory[i].ItemID == itemID && player.Inventory[i].Damage == damage && player.Inventory[i].Count+count <= 64 {
 			player.Inventory[i].Count += count
 			return i, true
 		}
@@ -1017,14 +1046,14 @@ func addItemToInventory(player *Player, itemID int16, count byte) (int, bool) {
 	// Try empty slot in hotbar
 	for i := 36; i <= 44; i++ {
 		if player.Inventory[i].ItemID == -1 {
-			player.Inventory[i] = Slot{ItemID: itemID, Count: count}
+			player.Inventory[i] = Slot{ItemID: itemID, Damage: damage, Count: count}
 			return i, true
 		}
 	}
 	// Try empty slot in main inventory
 	for i := 9; i <= 35; i++ {
 		if player.Inventory[i].ItemID == -1 {
-			player.Inventory[i] = Slot{ItemID: itemID, Count: count}
+			player.Inventory[i] = Slot{ItemID: itemID, Damage: damage, Count: count}
 			return i, true
 		}
 	}
