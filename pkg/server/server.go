@@ -60,6 +60,7 @@ type Server struct {
 	listener net.Listener
 	players  map[int32]*Player
 	entities map[int32]*ItemEntity
+	mobs     map[int32]*MobEntity
 	mu       sync.RWMutex
 	nextEID  int32
 	stopCh   chan struct{}
@@ -74,6 +75,30 @@ type ItemEntity struct {
 	Count      byte
 	X, Y, Z    float64
 	VX, VY, VZ float64 // Velocity tracking for drops
+}
+
+// MobEntity represents a spawned mob in the world.
+type MobEntity struct {
+	EntityID int32
+	TypeID   byte // Minecraft entity type ID (e.g. 50=Creeper, 90=Pig)
+	X, Y, Z  float64
+	Yaw      float32
+	Pitch    float32
+}
+
+// SpawnEggItemID is the item ID for spawn eggs in MC 1.8.
+const SpawnEggItemID = 383
+
+// IsValidSpawnEggType returns true if the damage value of a spawn egg
+// corresponds to a valid mob type that can be spawned.
+func IsValidSpawnEggType(typeID byte) bool {
+	switch typeID {
+	case 50, 51, 52, 54, 55, 56, 57, 58, 59, 60, 61, 62, // hostile
+		65, 66, 67, 68, // misc hostile
+		90, 91, 92, 93, 94, 95, 96, 98, 100, 101, 120: // passive
+		return true
+	}
+	return false
 }
 
 // Slot represents an inventory slot.
@@ -117,6 +142,7 @@ func New(config Config) *Server {
 		config:   config,
 		players:  make(map[int32]*Player),
 		entities: make(map[int32]*ItemEntity),
+		mobs:     make(map[int32]*MobEntity),
 		nextEID:  1,
 		stopCh:   make(chan struct{}),
 		world:    world.NewWorld(seed),
@@ -604,7 +630,7 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		x, y, z, _ := protocol.ReadPosition(r)
 		face, _ := protocol.ReadByte(r)
 		// Read held item slot data
-		itemID, _, _, _ := protocol.ReadSlotData(r)
+		itemID, _, itemDamage, _ := protocol.ReadSlotData(r)
 		// Cursor position (3 bytes) — ignored
 		_, _ = protocol.ReadByte(r)
 		_, _ = protocol.ReadByte(r)
@@ -641,6 +667,38 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 				protocol.WritePacket(player.Conn, pkt)
 			}
 			player.mu.Unlock()
+			return
+		}
+
+		// Handle spawn egg usage
+		if itemID == SpawnEggItemID && x != -1 {
+			mobType := byte(itemDamage)
+			if IsValidSpawnEggType(mobType) {
+				tx, ty, tz := faceOffset(x, y, z, face)
+				s.SpawnMob(float64(tx)+0.5, float64(ty), float64(tz)+0.5, 0, 0, mobType)
+				// Decrement item in survival mode
+				if player.GameMode == GameModeSurvival {
+					player.mu.Lock()
+					slotIndex := 36 + player.ActiveSlot
+					if player.Inventory[slotIndex].ItemID == SpawnEggItemID && player.Inventory[slotIndex].Count > 0 {
+						player.Inventory[slotIndex].Count--
+						if player.Inventory[slotIndex].Count <= 0 {
+							player.Inventory[slotIndex] = Slot{ItemID: -1}
+						}
+						slot := player.Inventory[slotIndex]
+						pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+							protocol.WriteByte(w, 0)
+							protocol.WriteInt16(w, int16(slotIndex))
+							protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+						})
+						if player.Conn != nil {
+							protocol.WritePacket(player.Conn, pkt)
+						}
+					}
+					player.mu.Unlock()
+				}
+				log.Printf("Player %s spawned mob type %d at (%d, %d, %d)", player.Username, mobType, tx, ty, tz)
+			}
 			return
 		}
 
@@ -1142,6 +1200,9 @@ func (s *Server) spawnEntitiesForPlayer(player *Player) {
 	for _, entity := range s.entities {
 		s.sendItemToPlayer(player, entity)
 	}
+	for _, mob := range s.mobs {
+		s.sendMobToPlayer(player, mob)
+	}
 }
 
 func (s *Server) sendItemToPlayer(player *Player, item *ItemEntity) {
@@ -1152,9 +1213,12 @@ func (s *Server) sendItemToPlayer(player *Player, item *ItemEntity) {
 		protocol.WriteInt32(w, int32(item.X*32))
 		protocol.WriteInt32(w, int32(item.Y*32))
 		protocol.WriteInt32(w, int32(item.Z*32))
-		protocol.WriteByte(w, 0)  // Pitch
-		protocol.WriteByte(w, 0)  // Yaw
-		protocol.WriteInt32(w, 0) // Data (needs to be non-zero for some objects, but 0 often means no velocity)
+		protocol.WriteByte(w, 0) // Pitch
+		protocol.WriteByte(w, 0) // Yaw
+		protocol.WriteInt32(w, 1) // Data: non-zero to include velocity
+		protocol.WriteInt16(w, int16(item.VX*8000))
+		protocol.WriteInt16(w, int16(item.VY*8000))
+		protocol.WriteInt16(w, int16(item.VZ*8000))
 	})
 
 	// Entity Metadata - 0x1C
@@ -1881,14 +1945,9 @@ func (s *Server) broadcastSpawnItem(item *ItemEntity) {
 		protocol.WriteInt32(w, int32(item.X*32))
 		protocol.WriteInt32(w, int32(item.Y*32))
 		protocol.WriteInt32(w, int32(item.Z*32))
-		protocol.WriteByte(w, 0)  // Pitch
-		protocol.WriteByte(w, 0)  // Yaw
-		protocol.WriteInt32(w, 0) // Data for thrower (0 usually)
-	})
-
-	// Entity Velocity - 0x12
-	velocityPkt := protocol.MarshalPacket(0x12, func(w *bytes.Buffer) {
-		protocol.WriteVarInt(w, item.EntityID)
+		protocol.WriteByte(w, 0) // Pitch
+		protocol.WriteByte(w, 0) // Yaw
+		protocol.WriteInt32(w, 1) // Data: non-zero to include velocity
 		protocol.WriteInt16(w, int16(item.VX*8000))
 		protocol.WriteInt16(w, int16(item.VY*8000))
 		protocol.WriteInt16(w, int16(item.VZ*8000))
@@ -1910,11 +1969,71 @@ func (s *Server) broadcastSpawnItem(item *ItemEntity) {
 		p.mu.Lock()
 		if p.Conn != nil {
 			protocol.WritePacket(p.Conn, spawnObj)
-			protocol.WritePacket(p.Conn, velocityPkt)
 			protocol.WritePacket(p.Conn, metadata)
 		}
 		p.mu.Unlock()
 	}
+}
+
+// SpawnMob creates a mob entity at the given position and broadcasts it.
+func (s *Server) SpawnMob(x, y, z float64, yaw, pitch float32, typeID byte) {
+	s.mu.Lock()
+	eid := s.nextEID
+	s.nextEID++
+
+	mob := &MobEntity{
+		EntityID: eid,
+		TypeID:   typeID,
+		X:        x,
+		Y:        y,
+		Z:        z,
+		Yaw:      yaw,
+		Pitch:    pitch,
+	}
+	s.mobs[eid] = mob
+	s.mu.Unlock()
+
+	s.broadcastSpawnMob(mob)
+}
+
+func (s *Server) broadcastSpawnMob(mob *MobEntity) {
+	pkt := s.makeSpawnMobPacket(mob)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		p.mu.Lock()
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
+		p.mu.Unlock()
+	}
+}
+
+func (s *Server) sendMobToPlayer(player *Player, mob *MobEntity) {
+	pkt := s.makeSpawnMobPacket(mob)
+
+	player.mu.Lock()
+	protocol.WritePacket(player.Conn, pkt)
+	player.mu.Unlock()
+}
+
+func (s *Server) makeSpawnMobPacket(mob *MobEntity) *protocol.Packet {
+	// Spawn Mob - 0x0F
+	return protocol.MarshalPacket(0x0F, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, mob.EntityID)
+		protocol.WriteByte(w, mob.TypeID)
+		protocol.WriteInt32(w, int32(mob.X*32)) // Fixed-point X
+		protocol.WriteInt32(w, int32(mob.Y*32)) // Fixed-point Y
+		protocol.WriteInt32(w, int32(mob.Z*32)) // Fixed-point Z
+		protocol.WriteByte(w, byte(mob.Yaw*256/360))
+		protocol.WriteByte(w, byte(mob.Pitch*256/360))
+		protocol.WriteByte(w, byte(mob.Pitch*256/360)) // Head Pitch
+		protocol.WriteInt16(w, 0)    // Velocity X
+		protocol.WriteInt16(w, 0)    // Velocity Y
+		protocol.WriteInt16(w, 0)    // Velocity Z
+		protocol.WriteByte(w, 0x7F)  // Entity metadata terminator
+	})
 }
 
 func (s *Server) broadcastCollectItem(collectedID, collectorID int32) {
