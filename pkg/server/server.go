@@ -124,12 +124,9 @@ type Player struct {
 	loadedChunks map[ChunkPos]bool
 	lastChunkX   int32
 	lastChunkZ   int32
-	DragSlots        []int16        // Slots being dragged over in mode 5
-	DragButton       int            // 0=left drag, 1=right drag
 	CraftTableGrid   [9]Slot        // 3x3 crafting grid for crafting table window
 	CraftTableOutput Slot           // Crafting output for crafting table window
 	OpenWindowID     byte           // Currently open window ID (0 = none/player inventory)
-	mu               sync.Mutex
 	NoClip       bool           // True when in spectator mode (can pass through blocks)
 	DragSlots    []int16        // Slots being dragged over in mode 5
 	DragButton   int            // 0=left drag, 1=right drag
