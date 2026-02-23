@@ -324,7 +324,11 @@ func (g *Generator) generateBoulders(chunkX, chunkZ int, sections *[SectionsPerC
 			}
 
 			// Create larger organic boulder
-			baseRadius := 2.0 + float64((wx*wz)%3) // Radius 2 to 4
+			hr := wx*31 + wz*17
+			if hr < 0 {
+				hr = -hr
+			}
+			baseRadius := 3.0 + float64(hr%3) // Radius 3 to 5
 			for dx := -int(baseRadius) - 1; dx <= int(baseRadius)+1; dx++ {
 				for dy := -1; dy <= int(baseRadius); dy++ {
 					for dz := -int(baseRadius) - 1; dz <= int(baseRadius)+1; dz++ {
