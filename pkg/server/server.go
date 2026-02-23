@@ -57,14 +57,15 @@ type ChunkPos struct {
 
 // Server represents a Minecraft 1.8 server.
 type Server struct {
-	config   Config
-	listener net.Listener
-	players  map[int32]*Player
-	entities map[int32]*ItemEntity
-	mu       sync.RWMutex
-	nextEID  int32
-	stopCh   chan struct{}
-	world    *world.World
+	config      Config
+	listener    net.Listener
+	players     map[int32]*Player
+	entities    map[int32]*ItemEntity
+	mobEntities map[int32]*MobEntity
+	mu          sync.RWMutex
+	nextEID     int32
+	stopCh      chan struct{}
+	world       *world.World
 }
 
 // ItemEntity represents an item dropped on the ground.
@@ -75,6 +76,19 @@ type ItemEntity struct {
 	Count      byte
 	X, Y, Z    float64
 	VX, VY, VZ float64 // Velocity tracking for drops
+}
+
+// MobEntity represents a living entity (mob) in the world.
+type MobEntity struct {
+	EntityID   int32
+	MobType    byte // Minecraft mob type ID (e.g., 50=Creeper, 90=Pig)
+	X, Y, Z    float64
+	VX, VY, VZ float64
+	Yaw, Pitch float32
+	HeadPitch  float32
+	OnGround   bool
+	// AIFunc is an optional AI callback invoked each tick. Can be nil.
+	AIFunc     func(mob *MobEntity, s *Server)
 }
 
 // Slot represents an inventory slot.
@@ -117,12 +131,13 @@ func New(config Config) *Server {
 	}
 	log.Printf("World seed: %d", seed)
 	return &Server{
-		config:   config,
-		players:  make(map[int32]*Player),
-		entities: make(map[int32]*ItemEntity),
-		nextEID:  1,
-		stopCh:   make(chan struct{}),
-		world:    world.NewWorld(seed),
+		config:      config,
+		players:     make(map[int32]*Player),
+		entities:    make(map[int32]*ItemEntity),
+		mobEntities: make(map[int32]*MobEntity),
+		nextEID:     1,
+		stopCh:      make(chan struct{}),
+		world:       world.NewWorld(seed),
 	}
 }
 
@@ -229,11 +244,76 @@ func (s *Server) tickEntityPhysics() {
 		movedItems = append(movedItems, movedItem{item.EntityID, item.X, item.Y, item.Z})
 	}
 
+	// Tick mob entities: gravity, physics, and optional AI
+	type movedMob struct {
+		entityID   int32
+		x, y, z    float64
+		yaw, pitch float32
+		onGround   bool
+	}
+	var movedMobs []movedMob
+
+	for _, mob := range s.mobEntities {
+		// Run AI if present
+		if mob.AIFunc != nil {
+			mob.AIFunc(mob, s)
+		}
+
+		if mob.VX == 0 && mob.VY == 0 && mob.VZ == 0 {
+			blockBelow := s.world.GetBlock(int32(math.Floor(mob.X)), int32(math.Floor(mob.Y-0.1)), int32(math.Floor(mob.Z)))
+			if blockBelow>>4 != 0 {
+				mob.OnGround = true
+				continue
+			}
+			mob.OnGround = false
+		}
+
+		// Apply gravity
+		mob.VY -= gravity
+
+		// Apply drag
+		mob.VX *= drag
+		mob.VY *= drag
+		mob.VZ *= drag
+
+		newX := mob.X + mob.VX
+		newY := mob.Y + mob.VY
+		newZ := mob.Z + mob.VZ
+
+		// Ground collision
+		blockAtNew := s.world.GetBlock(int32(math.Floor(newX)), int32(math.Floor(newY)), int32(math.Floor(newZ)))
+		if blockAtNew>>4 != 0 {
+			newY = math.Floor(newY) + 1.0
+			mob.VY = 0
+			mob.VX *= groundDrag
+			mob.VZ *= groundDrag
+			mob.OnGround = true
+
+			if math.Abs(mob.VX) < 0.001 {
+				mob.VX = 0
+			}
+			if math.Abs(mob.VZ) < 0.001 {
+				mob.VZ = 0
+			}
+		} else {
+			mob.OnGround = false
+		}
+
+		mob.X = newX
+		mob.Y = newY
+		mob.Z = newZ
+
+		movedMobs = append(movedMobs, movedMob{mob.EntityID, mob.X, mob.Y, mob.Z, mob.Yaw, mob.Pitch, mob.OnGround})
+	}
+
 	s.mu.Unlock()
 
 	// Broadcast entity teleport packets
 	for _, m := range movedItems {
 		s.broadcastEntityTeleportByID(m.entityID, m.x, m.y, m.z, 0, 0, true)
+	}
+	for _, m := range movedMobs {
+		s.broadcastEntityTeleportByID(m.entityID, m.x, m.y, m.z, m.yaw, m.pitch, m.onGround)
 	}
 }
 
@@ -528,6 +608,9 @@ func (s *Server) handlePlay(player *Player) {
 	// Spawn existing item entities for this player
 	s.spawnEntitiesForPlayer(player)
 
+	// Spawn existing mob entities for this player
+	s.spawnMobEntitiesForPlayer(player)
+
 	// Main packet read loop
 	for {
 		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
@@ -784,7 +867,39 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			player.mu.Lock()
 			slotIndex := 36 + player.ActiveSlot
 			slot := player.Inventory[slotIndex]
+			player.mu.Unlock()
+
+			// Spawn eggs used in air (use item) — spawn at player's look position
+			if itemID == 383 {
+				player.mu.Lock()
+				px, py, pz := player.X, player.Y, player.Z
+				player.mu.Unlock()
+				mobType := byte(slot.Damage)
+				s.SpawnMob(px, py+1.0, pz, mobType)
+				if player.GameMode == GameModeSurvival {
+					player.mu.Lock()
+					si := 36 + player.ActiveSlot
+					player.Inventory[si].Count--
+					if player.Inventory[si].Count <= 0 {
+						player.Inventory[si] = Slot{ItemID: -1}
+					}
+					sl := player.Inventory[si]
+					syncPkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+						protocol.WriteByte(w, 0)
+						protocol.WriteInt16(w, int16(si))
+						protocol.WriteSlotData(w, sl.ItemID, sl.Count, sl.Damage)
+					})
+					if player.Conn != nil {
+						protocol.WritePacket(player.Conn, syncPkt)
+					}
+					player.mu.Unlock()
+				}
+				log.Printf("Player %s used spawn egg (mob type %d) in air", player.Username, slot.Damage)
+				return
+			}
+
 			log.Printf("Aborting USE ITEM for %d. Server thinks active slot %d (index %d) has item %d:%d qty %d", itemID, player.ActiveSlot, slotIndex, slot.ItemID, slot.Damage, slot.Count)
+			player.mu.Lock()
 			pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
 				protocol.WriteByte(w, 0) // Window ID 0 = player inventory
 				protocol.WriteInt16(w, int16(slotIndex))
@@ -794,6 +909,38 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 				protocol.WritePacket(player.Conn, pkt)
 			}
 			player.mu.Unlock()
+			return
+		}
+
+		// Handle spawn egg right-click on a block
+		if itemID == 383 {
+			tx, ty, tz := faceOffset(x, y, z, face)
+			player.mu.Lock()
+			slotIndex := 36 + player.ActiveSlot
+			slot := player.Inventory[slotIndex]
+			mobType := byte(slot.Damage)
+			player.mu.Unlock()
+
+			s.SpawnMob(float64(tx)+0.5, float64(ty), float64(tz)+0.5, mobType)
+
+			if player.GameMode == GameModeSurvival {
+				player.mu.Lock()
+				player.Inventory[slotIndex].Count--
+				if player.Inventory[slotIndex].Count <= 0 {
+					player.Inventory[slotIndex] = Slot{ItemID: -1}
+				}
+				sl := player.Inventory[slotIndex]
+				syncPkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+					protocol.WriteByte(w, 0)
+					protocol.WriteInt16(w, int16(slotIndex))
+					protocol.WriteSlotData(w, sl.ItemID, sl.Count, sl.Damage)
+				})
+				if player.Conn != nil {
+					protocol.WritePacket(player.Conn, syncPkt)
+				}
+				player.mu.Unlock()
+			}
+			log.Printf("Player %s used spawn egg (mob type %d) at (%d, %d, %d)", player.Username, mobType, tx, ty, tz)
 			return
 		}
 
@@ -2405,5 +2552,85 @@ func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
 				}
 			}
 		}
+	}
+}
+
+// SpawnMob creates a mob entity at the given position and broadcasts it to all players.
+func (s *Server) SpawnMob(x, y, z float64, mobType byte) {
+	s.mu.Lock()
+	eid := s.nextEID
+	s.nextEID++
+
+	mob := &MobEntity{
+		EntityID: eid,
+		MobType:  mobType,
+		X:        x,
+		Y:        y,
+		Z:        z,
+	}
+	s.mobEntities[eid] = mob
+	s.mu.Unlock()
+
+	s.broadcastSpawnMob(mob)
+	log.Printf("Spawned mob type %d (EID: %d) at (%.1f, %.1f, %.1f)", mobType, eid, x, y, z)
+}
+
+func (s *Server) broadcastSpawnMob(mob *MobEntity) {
+	// Spawn Mob packet - 0x0F
+	pkt := protocol.MarshalPacket(0x0F, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, mob.EntityID)
+		protocol.WriteByte(w, mob.MobType)
+		protocol.WriteInt32(w, int32(mob.X*32))
+		protocol.WriteInt32(w, int32(mob.Y*32))
+		protocol.WriteInt32(w, int32(mob.Z*32))
+		protocol.WriteByte(w, byte(mob.Yaw*256/360))
+		protocol.WriteByte(w, byte(mob.Pitch*256/360))
+		protocol.WriteByte(w, byte(mob.HeadPitch*256/360))
+		protocol.WriteInt16(w, int16(mob.VX*8000))
+		protocol.WriteInt16(w, int16(mob.VY*8000))
+		protocol.WriteInt16(w, int16(mob.VZ*8000))
+		protocol.WriteByte(w, 0x7F) // Metadata terminator (no extra metadata)
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		p.mu.Lock()
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
+		p.mu.Unlock()
+	}
+}
+
+func (s *Server) sendMobToPlayer(player *Player, mob *MobEntity) {
+	pkt := protocol.MarshalPacket(0x0F, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, mob.EntityID)
+		protocol.WriteByte(w, mob.MobType)
+		protocol.WriteInt32(w, int32(mob.X*32))
+		protocol.WriteInt32(w, int32(mob.Y*32))
+		protocol.WriteInt32(w, int32(mob.Z*32))
+		protocol.WriteByte(w, byte(mob.Yaw*256/360))
+		protocol.WriteByte(w, byte(mob.Pitch*256/360))
+		protocol.WriteByte(w, byte(mob.HeadPitch*256/360))
+		protocol.WriteInt16(w, int16(mob.VX*8000))
+		protocol.WriteInt16(w, int16(mob.VY*8000))
+		protocol.WriteInt16(w, int16(mob.VZ*8000))
+		protocol.WriteByte(w, 0x7F) // Metadata terminator
+	})
+
+	player.mu.Lock()
+	if player.Conn != nil {
+		protocol.WritePacket(player.Conn, pkt)
+	}
+	player.mu.Unlock()
+}
+
+func (s *Server) spawnMobEntitiesForPlayer(player *Player) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, mob := range s.mobEntities {
+		s.sendMobToPlayer(player, mob)
 	}
 }
