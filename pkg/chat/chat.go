@@ -30,11 +30,11 @@ func Colored(text, color string) Message {
 	return Message{Text: text, Color: color}
 }
 
-// Translatef creates a simple formatted message.
-func Translatef(format string, args ...Message) Message {
-	msg := Message{Text: format}
-	if len(args) > 0 {
-		msg.Extra = args
+// WithExtra creates a message with additional components appended.
+func WithExtra(text string, extra ...Message) Message {
+	msg := Message{Text: text}
+	if len(extra) > 0 {
+		msg.Extra = extra
 	}
 	return msg
 }

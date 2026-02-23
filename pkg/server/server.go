@@ -197,7 +197,11 @@ func (s *Server) handleStatusRequest(conn net.Conn) {
 		},
 	}
 
-	jsonResp, _ := json.Marshal(response)
+	jsonResp, err := json.Marshal(response)
+	if err != nil {
+		log.Printf("Failed to marshal status response: %v", err)
+		return
+	}
 	pkt := protocol.MarshalPacket(0x00, func(w *bytes.Buffer) {
 		protocol.WriteString(w, string(jsonResp))
 	})
