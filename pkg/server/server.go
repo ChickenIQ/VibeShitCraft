@@ -97,6 +97,7 @@ type Player struct {
 	Health       float32
 	IsDead       bool
 	Inventory    [45]Slot
+	Cursor       Slot
 	loadedChunks map[ChunkPos]bool
 	lastChunkX   int32
 	lastChunkZ   int32
@@ -317,6 +318,7 @@ func (s *Server) handleLoginStart(conn net.Conn, pkt *protocol.Packet) (*Player,
 	for i := range player.Inventory {
 		player.Inventory[i].ItemID = -1
 	}
+	player.Cursor.ItemID = -1
 
 	// Send Login Success
 	loginSuccess := protocol.MarshalPacket(0x02, func(w *bytes.Buffer) {
@@ -335,13 +337,13 @@ func (s *Server) handlePlay(player *Player) {
 
 	// Send Join Game
 	joinGame := protocol.MarshalPacket(0x01, func(w *bytes.Buffer) {
-		protocol.WriteInt32(w, player.EntityID)            // Entity ID
-		protocol.WriteByte(w, player.GameMode)             // Gamemode
-		protocol.WriteByte(w, 0)                           // Dimension: overworld
-		protocol.WriteByte(w, 0)                           // Difficulty: peaceful
-		protocol.WriteByte(w, byte(s.config.MaxPlayers))   // Max players
-		protocol.WriteString(w, "default")                 // Level type
-		protocol.WriteBool(w, false)                       // Reduced debug info
+		protocol.WriteInt32(w, player.EntityID)          // Entity ID
+		protocol.WriteByte(w, player.GameMode)           // Gamemode
+		protocol.WriteByte(w, 0)                         // Dimension: overworld
+		protocol.WriteByte(w, 0)                         // Difficulty: peaceful
+		protocol.WriteByte(w, byte(s.config.MaxPlayers)) // Max players
+		protocol.WriteString(w, "default")               // Level type
+		protocol.WriteBool(w, false)                     // Reduced debug info
 	})
 	protocol.WritePacket(conn, joinGame)
 
@@ -660,6 +662,157 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			player.Inventory[slotNum] = Slot{ItemID: itemID, Count: count, Damage: damage}
 		}
 		player.mu.Unlock()
+
+	case 0x0E: // Click Window
+		_, _ = protocol.ReadByte(r) // window ID
+		slotNum, _ := protocol.ReadInt16(r)
+		button, _ := protocol.ReadByte(r)
+		actionNum, _ := protocol.ReadInt16(r)
+		mode, _ := protocol.ReadByte(r)
+		// Read held item slot data
+		itemID, _, _, _ := protocol.ReadSlotData(r)
+		_ = itemID
+
+		player.mu.Lock()
+		px, py, pz := player.X, player.Y, player.Z
+
+		if slotNum >= 0 && slotNum < 45 {
+			if mode == 0 { // Normal click
+				if button == 0 { // Left click
+					if player.Cursor.ItemID == player.Inventory[slotNum].ItemID && player.Cursor.Damage == player.Inventory[slotNum].Damage && player.Cursor.ItemID != -1 {
+						space := 64 - player.Inventory[slotNum].Count
+						if player.Cursor.Count <= space {
+							player.Inventory[slotNum].Count += player.Cursor.Count
+							player.Cursor = Slot{ItemID: -1}
+						} else {
+							player.Inventory[slotNum].Count = 64
+							player.Cursor.Count -= space
+						}
+					} else { // Swap
+						temp := player.Inventory[slotNum]
+						player.Inventory[slotNum] = player.Cursor
+						player.Cursor = temp
+					}
+				} else if button == 1 { // Right click
+					if player.Cursor.ItemID == -1 && player.Inventory[slotNum].ItemID != -1 {
+						half := (player.Inventory[slotNum].Count + 1) / 2
+						player.Cursor = player.Inventory[slotNum]
+						player.Cursor.Count = half
+						player.Inventory[slotNum].Count -= half
+						if player.Inventory[slotNum].Count == 0 {
+							player.Inventory[slotNum] = Slot{ItemID: -1}
+						}
+					} else if player.Cursor.ItemID != -1 && player.Inventory[slotNum].ItemID == -1 {
+						player.Inventory[slotNum] = player.Cursor
+						player.Inventory[slotNum].Count = 1
+						player.Cursor.Count--
+						if player.Cursor.Count == 0 {
+							player.Cursor = Slot{ItemID: -1}
+						}
+					} else if player.Cursor.ItemID == player.Inventory[slotNum].ItemID && player.Cursor.Damage == player.Inventory[slotNum].Damage {
+						if player.Inventory[slotNum].Count < 64 {
+							player.Inventory[slotNum].Count++
+							player.Cursor.Count--
+							if player.Cursor.Count == 0 {
+								player.Cursor = Slot{ItemID: -1}
+							}
+						}
+					} else { // Swap
+						temp := player.Inventory[slotNum]
+						player.Inventory[slotNum] = player.Cursor
+						player.Cursor = temp
+					}
+				}
+			}
+		}
+
+		// Mode 4 is drop from window
+		if mode == 4 && player.GameMode != GameModeSpectator {
+			if slotNum == -999 { // Drop from cursor
+				if player.Cursor.ItemID != -1 {
+					dropCount := player.Cursor.Count
+					if button == 0 { // Left click drops 1
+						dropCount = 1
+						player.Cursor.Count--
+						if player.Cursor.Count <= 0 {
+							player.Cursor = Slot{ItemID: -1}
+						}
+					} else {
+						player.Cursor = Slot{ItemID: -1}
+					}
+					player.mu.Unlock() // unlock to spawn
+					s.SpawnItem(px, py+1.5, pz, player.Cursor.ItemID, player.Cursor.Damage, dropCount)
+					player.mu.Lock()
+				}
+			} else if slotNum >= 0 && slotNum < 45 {
+				if player.Inventory[slotNum].ItemID != -1 {
+					dropCount := player.Inventory[slotNum].Count
+					if button == 0 { // Q drops 1
+						dropCount = 1
+						player.Inventory[slotNum].Count--
+						if player.Inventory[slotNum].Count <= 0 {
+							player.Inventory[slotNum] = Slot{ItemID: -1}
+						}
+					} else {
+						player.Inventory[slotNum] = Slot{ItemID: -1}
+					}
+					dropItemID := player.Inventory[slotNum].ItemID
+					dropDamage := player.Inventory[slotNum].Damage
+					player.mu.Unlock() // unlock to spawn
+					s.SpawnItem(px, py+1.5, pz, dropItemID, dropDamage, dropCount)
+					player.mu.Lock()
+				}
+			}
+		} else if slotNum == -999 && mode == 0 && player.Cursor.ItemID != -1 { // Clicked outside with cursor
+			dropCount := player.Cursor.Count
+			if button == 0 {
+				dropCount = player.Cursor.Count
+			} else {
+				dropCount = 1
+			} // Left drops all, right drops 1
+
+			dropDamage := player.Cursor.Damage
+			dropItemID := player.Cursor.ItemID
+
+			player.Cursor.Count -= dropCount
+			if player.Cursor.Count <= 0 {
+				player.Cursor = Slot{ItemID: -1}
+			}
+
+			player.mu.Unlock()
+			s.SpawnItem(px, py+1.5, pz, dropItemID, dropDamage, dropCount)
+			player.mu.Lock()
+		}
+
+		// Acknowledge action
+		confirmPkt := protocol.MarshalPacket(0x32, func(w *bytes.Buffer) {
+			protocol.WriteByte(w, 0) // window ID
+			protocol.WriteInt16(w, actionNum)
+			protocol.WriteBool(w, true) // accepted
+		})
+
+		// Always send a full WindowItems sync and SetSlot for cursor to prevent ANY duplication/desyncs!
+		syncPkt := protocol.MarshalPacket(0x30, func(w *bytes.Buffer) {
+			protocol.WriteByte(w, 0)   // Window ID
+			protocol.WriteInt16(w, 45) // Count
+			for i := 0; i < 45; i++ {
+				slot := player.Inventory[i]
+				protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+			}
+		})
+		cursorPkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+			protocol.WriteByte(w, 0xff) // Cursor
+			protocol.WriteInt16(w, -1)
+			protocol.WriteSlotData(w, player.Cursor.ItemID, player.Cursor.Count, player.Cursor.Damage)
+		})
+
+		if player.Conn != nil {
+			protocol.WritePacket(player.Conn, confirmPkt)
+			protocol.WritePacket(player.Conn, syncPkt)
+			protocol.WritePacket(player.Conn, cursorPkt)
+		}
+
+		player.mu.Unlock()
 	}
 }
 
@@ -772,9 +925,9 @@ func (s *Server) sendChunkUpdates(player *Player) {
 		pkt := protocol.MarshalPacket(0x21, func(w *bytes.Buffer) {
 			protocol.WriteInt32(w, pos.X)
 			protocol.WriteInt32(w, pos.Z)
-			protocol.WriteBool(w, true)     // Ground-up continuous
-			protocol.WriteUint16(w, 0)      // Primary bit mask: 0 = unload
-			protocol.WriteVarInt(w, 0)      // Size: 0
+			protocol.WriteBool(w, true) // Ground-up continuous
+			protocol.WriteUint16(w, 0)  // Primary bit mask: 0 = unload
+			protocol.WriteVarInt(w, 0)  // Size: 0
 		})
 		player.mu.Lock()
 		protocol.WritePacket(player.Conn, pkt)
@@ -888,10 +1041,10 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 		protocol.WriteVarInt(w, 1) // Number of players
 		protocol.WriteUUID(w, target.UUID)
 		protocol.WriteString(w, target.Username)
-		protocol.WriteVarInt(w, 0) // Number of properties
+		protocol.WriteVarInt(w, 0)                      // Number of properties
 		protocol.WriteVarInt(w, int32(target.GameMode)) // Gamemode
-		protocol.WriteVarInt(w, 0) // Ping
-		protocol.WriteBool(w, false) // Has display name
+		protocol.WriteVarInt(w, 0)                      // Ping
+		protocol.WriteBool(w, false)                    // Has display name
 	})
 	viewer.mu.Lock()
 	protocol.WritePacket(viewer.Conn, playerListAdd)
@@ -901,13 +1054,13 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 	spawnPlayer := protocol.MarshalPacket(0x0C, func(w *bytes.Buffer) {
 		protocol.WriteVarInt(w, target.EntityID)
 		protocol.WriteUUID(w, target.UUID)
-		protocol.WriteInt32(w, int32(x*32))    // Fixed-point X
-		protocol.WriteInt32(w, int32(y*32))    // Fixed-point Y
-		protocol.WriteInt32(w, int32(z*32))    // Fixed-point Z
+		protocol.WriteInt32(w, int32(x*32)) // Fixed-point X
+		protocol.WriteInt32(w, int32(y*32)) // Fixed-point Y
+		protocol.WriteInt32(w, int32(z*32)) // Fixed-point Z
 		protocol.WriteByte(w, byte(yaw*256/360))
 		protocol.WriteByte(w, byte(pitch*256/360))
-		protocol.WriteInt16(w, 0)              // Current item
-		protocol.WriteByte(w, 0x7F)            // Metadata terminator
+		protocol.WriteInt16(w, 0)   // Current item
+		protocol.WriteByte(w, 0x7F) // Metadata terminator
 	})
 	viewer.mu.Lock()
 	protocol.WritePacket(viewer.Conn, spawnPlayer)
@@ -1025,7 +1178,7 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 	// Handle multi-block structures (doors, double plants)
 	metadata := int16(blockState & 0x0F)
 	isUpperHalf := metadata&0x08 != 0
-	
+
 	var otherY int32
 	if isUpperHalf {
 		otherY = y - 1
@@ -1237,10 +1390,10 @@ func (s *Server) broadcastPlayerListGamemode(player *Player) {
 	player.mu.Unlock()
 
 	pkt := protocol.MarshalPacket(0x38, func(w *bytes.Buffer) {
-		protocol.WriteVarInt(w, 1)                  // Action: Update Gamemode
-		protocol.WriteVarInt(w, 1)                  // Number of players
+		protocol.WriteVarInt(w, 1) // Action: Update Gamemode
+		protocol.WriteVarInt(w, 1) // Number of players
 		protocol.WriteUUID(w, uuid)
-		protocol.WriteVarInt(w, int32(gameMode))    // New gamemode
+		protocol.WriteVarInt(w, int32(gameMode)) // New gamemode
 	})
 
 	s.mu.RLock()
@@ -1473,8 +1626,8 @@ func (s *Server) handleGamemodeCommand(player *Player, args []string) {
 
 	// Send Change Game State packet (reason=3 = change game mode)
 	changeGameState := protocol.MarshalPacket(0x2B, func(w *bytes.Buffer) {
-		protocol.WriteByte(w, 3)                    // Reason: change game mode
-		protocol.WriteFloat32(w, float32(mode))     // Value: new game mode
+		protocol.WriteByte(w, 3)                // Reason: change game mode
+		protocol.WriteFloat32(w, float32(mode)) // Value: new game mode
 	})
 	player.mu.Lock()
 	protocol.WritePacket(player.Conn, changeGameState)
