@@ -39,12 +39,17 @@ func main() {
 	log.Printf("VibeShitCraft server started (Minecraft 1.8.9, Protocol 47)")
 	log.Printf("Address: %s | Max Players: %d", config.Address, config.MaxPlayers)
 
-	// Wait for interrupt signal
+	// Wait for interrupt signal or internal shutdown
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	<-sigCh
 
-	log.Println("Shutting down server...")
+	select {
+	case sig := <-sigCh:
+		log.Printf("Shutting down server (received signal: %v)...", sig)
+	case <-srv.StopChan():
+		log.Println("Shutting down server (internal)...")
+	}
+
 	srv.Stop()
 	log.Println("Server stopped.")
 }

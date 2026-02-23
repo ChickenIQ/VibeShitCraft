@@ -51,6 +51,7 @@ type Server struct {
 	mobEntities map[int32]*MobEntity
 	nextEID     int32
 	stopCh      chan struct{}
+	stopOnce    sync.Once
 	world       *world.World
 }
 
@@ -88,15 +89,24 @@ func (s *Server) Start() error {
 
 // Stop gracefully shuts down the server.
 func (s *Server) Stop() {
-	close(s.stopCh)
-	if s.listener != nil {
-		s.listener.Close()
-	}
-	s.mu.RLock()
-	for _, p := range s.players {
-		p.Conn.Close()
-	}
-	s.mu.RUnlock()
+	s.stopOnce.Do(func() {
+		close(s.stopCh)
+		if s.listener != nil {
+			s.listener.Close()
+		}
+		s.mu.RLock()
+		for _, p := range s.players {
+			if p.Conn != nil {
+				p.Conn.Close()
+			}
+		}
+		s.mu.RUnlock()
+	})
+}
+
+// StopChan returns a channel that is closed when the server is stopped.
+func (s *Server) StopChan() <-chan struct{} {
+	return s.stopCh
 }
 
 func (s *Server) acceptLoop() {
