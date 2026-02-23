@@ -1,9 +1,7 @@
 name: Build and Release
 
 on:
-  push:
-    branches:
-      - '**'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -188,7 +186,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ steps.padded.outputs.run_number }}
-          name: Build ${{ github.run_number }} from ${{ github.ref_name }}
+          name: Complete Build ${{ github.run_number }} from ${{ github.ref_name }}
           body: "Built from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})"
           files: artifacts/*
           make_latest: true

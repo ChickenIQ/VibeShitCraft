@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - '**'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: linux/amd64
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          GOOS: linux
+          GOARCH: amd64
+          GOAMD64: v1
+        run: |
+          NAME="vibeshitcraft-linux-amd64"
+          go build -o "${NAME}" ./cmd/server/
+          echo "BINARY_NAME=${NAME}" >> $GITHUB_ENV
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64
+          path: ${{ env.BINARY_NAME }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4.1.3
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Compute padded run number
+        id: padded
+        run: echo "run_number=$(printf '%06d' ${{ github.run_number }})" >> $GITHUB_OUTPUT
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ steps.padded.outputs.run_number }}
+          name: Linux Build ${{ github.run_number }} from ${{ github.ref_name }}
+          body: "Built from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})"
+          files: artifacts/*
+          make_latest: true
