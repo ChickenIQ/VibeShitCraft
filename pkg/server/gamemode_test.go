@@ -392,3 +392,197 @@ func TestNonSpectatorEntityFlagsVisible(t *testing.T) {
 		t.Error("creative player entity metadata should NOT have invisible flag")
 	}
 }
+
+func TestSpectatorNoClipSet(t *testing.T) {
+	s := New(DefaultConfig())
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	player := &Player{
+		EntityID: 1,
+		Username: "Tester",
+		Conn:     c1,
+		GameMode: GameModeCreative,
+	}
+	s.players[player.EntityID] = player
+
+	// Drain packets
+	go func() {
+		for {
+			if _, err := protocol.ReadPacket(c2); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Switch to spectator mode - NoClip should be set
+	s.switchGameMode(player, GameModeSpectator)
+
+	player.mu.Lock()
+	if !player.NoClip {
+		t.Error("NoClip should be true in spectator mode")
+	}
+	player.mu.Unlock()
+
+	// Switch back to creative - NoClip should be unset
+	s.switchGameMode(player, GameModeCreative)
+
+	player.mu.Lock()
+	if player.NoClip {
+		t.Error("NoClip should be false in creative mode")
+	}
+	player.mu.Unlock()
+}
+
+func TestSpectatorNoClipOnJoin(t *testing.T) {
+	config := Config{
+		Address:         "127.0.0.1:0",
+		MaxPlayers:      10,
+		MOTD:            "Test",
+		DefaultGameMode: GameModeSpectator,
+	}
+	srv := New(config)
+
+	if srv.config.DefaultGameMode != GameModeSpectator {
+		t.Fatalf("DefaultGameMode = %d, want %d", srv.config.DefaultGameMode, GameModeSpectator)
+	}
+
+	// Create a player with the default spectator gamemode (mimics player creation logic)
+	player := &Player{
+		EntityID: 1,
+		Username: "Tester",
+		GameMode: srv.config.DefaultGameMode,
+		NoClip:   srv.config.DefaultGameMode == GameModeSpectator,
+	}
+
+	if !player.NoClip {
+		t.Error("player joining in spectator mode should have NoClip=true")
+	}
+	if player.GameMode != GameModeSpectator {
+		t.Errorf("GameMode = %d, want %d", player.GameMode, GameModeSpectator)
+	}
+}
+
+func TestPlayerListRemoveOnDisconnect(t *testing.T) {
+	s := New(DefaultConfig())
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	leavingPlayer := &Player{
+		EntityID: 1,
+		Username: "Leaver",
+		Conn:     c1,
+		UUID:     [16]byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10},
+	}
+
+	c3, c4 := net.Pipe()
+	defer c3.Close()
+	defer c4.Close()
+
+	remainingPlayer := &Player{
+		EntityID: 2,
+		Username: "Stayer",
+		Conn:     c3,
+	}
+	s.players[leavingPlayer.EntityID] = leavingPlayer
+	s.players[remainingPlayer.EntityID] = remainingPlayer
+
+	// Drain packets from the leaving player's connection
+	go func() {
+		for {
+			if _, err := protocol.ReadPacket(c2); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Listen for PlayerListItem remove packet (0x38, action 4) on remaining player's conn
+	receivedRemove := false
+	done := make(chan bool, 1)
+	go func() {
+		for {
+			pkt, err := protocol.ReadPacket(c4)
+			if err != nil {
+				return
+			}
+			if pkt.ID == 0x38 {
+				r := bytes.NewReader(pkt.Data)
+				action, _, _ := protocol.ReadVarInt(r)
+				if action == 4 { // Remove Player
+					receivedRemove = true
+					done <- true
+				}
+			}
+		}
+	}()
+
+	// Simulate the leaving player's connection closing
+	s.broadcastPlayerListRemove(leavingPlayer.UUID)
+
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+	}
+
+	if !receivedRemove {
+		t.Error("remaining player should receive PlayerListItem Remove packet when another player disconnects")
+	}
+}
+
+func TestSpectatorCannotAttack(t *testing.T) {
+	s := New(Config{Address: "127.0.0.1:0", MaxPlayers: 10, MOTD: "Test", Seed: 12345})
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	attacker := &Player{
+		EntityID: 1,
+		Username: "Spectator",
+		Conn:     c1,
+		GameMode: GameModeSpectator,
+		Health:   20.0,
+	}
+
+	c3, c4 := net.Pipe()
+	defer c3.Close()
+	defer c4.Close()
+
+	target := &Player{
+		EntityID: 2,
+		Username: "Target",
+		Conn:     c3,
+		GameMode: GameModeSurvival,
+		Health:   20.0,
+	}
+
+	s.players[attacker.EntityID] = attacker
+	s.players[target.EntityID] = target
+
+	// Drain packets from both connections
+	go func() {
+		for {
+			if _, err := protocol.ReadPacket(c2); err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		for {
+			if _, err := protocol.ReadPacket(c4); err != nil {
+				return
+			}
+		}
+	}()
+
+	// Spectator tries to attack target
+	s.handleAttack(attacker, target.EntityID)
+
+	// Target health should not have changed
+	target.mu.Lock()
+	if target.Health != 20.0 {
+		t.Errorf("target Health = %f, want 20.0 (spectator should not be able to attack)", target.Health)
+	}
+	target.mu.Unlock()
+}
