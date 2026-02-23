@@ -9,8 +9,146 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
+  build:
+    name: ${{ matrix.goos }}/${{ matrix.goarch }}${{ matrix.suffix }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # aix
+          - { goos: aix,       goarch: ppc64,    goppc64: power8,     suffix: -power8    }
+          - { goos: aix,       goarch: ppc64,    goppc64: power9,     suffix: -power9    }
+          - { goos: aix,       goarch: ppc64,    goppc64: power10,    suffix: -power10   }
+          # android
+          - { goos: android,   goarch: "386",    go386: sse2,         suffix: -sse2      }
+          - { goos: android,   goarch: "386",    go386: softfloat,    suffix: -softfloat }
+          - { goos: android,   goarch: amd64,    goamd64: v1,         suffix: -v1        }
+          - { goos: android,   goarch: amd64,    goamd64: v2,         suffix: -v2        }
+          - { goos: android,   goarch: amd64,    goamd64: v3,         suffix: -v3        }
+          - { goos: android,   goarch: amd64,    goamd64: v4,         suffix: -v4        }
+          - { goos: android,   goarch: arm,      goarm: "5",          suffix: -v5        }
+          - { goos: android,   goarch: arm,      goarm: "6",          suffix: -v6        }
+          - { goos: android,   goarch: arm,      goarm: "7",          suffix: -v7        }
+          - { goos: android,   goarch: arm64 }
+          # darwin
+          - { goos: darwin,    goarch: amd64,    goamd64: v1,         suffix: -v1        }
+          - { goos: darwin,    goarch: amd64,    goamd64: v2,         suffix: -v2        }
+          - { goos: darwin,    goarch: amd64,    goamd64: v3,         suffix: -v3        }
+          - { goos: darwin,    goarch: amd64,    goamd64: v4,         suffix: -v4        }
+          - { goos: darwin,    goarch: arm64 }
+          # dragonfly
+          - { goos: dragonfly, goarch: amd64,    goamd64: v1,         suffix: -v1        }
+          - { goos: dragonfly, goarch: amd64,    goamd64: v2,         suffix: -v2        }
+          - { goos: dragonfly, goarch: amd64,    goamd64: v3,         suffix: -v3        }
+          - { goos: dragonfly, goarch: amd64,    goamd64: v4,         suffix: -v4        }
+          # freebsd
+          - { goos: freebsd,   goarch: "386",    go386: sse2,         suffix: -sse2      }
+          - { goos: freebsd,   goarch: "386",    go386: softfloat,    suffix: -softfloat }
+          - { goos: freebsd,   goarch: amd64,    goamd64: v1,         suffix: -v1        }
+          - { goos: freebsd,   goarch: amd64,    goamd64: v2,         suffix: -v2        }
+          - { goos: freebsd,   goarch: amd64,    goamd64: v3,         suffix: -v3        }
+          - { goos: freebsd,   goarch: amd64,    goamd64: v4,         suffix: -v4        }
+          - { goos: freebsd,   goarch: arm,      goarm: "5",          suffix: -v5        }
+          - { goos: freebsd,   goarch: arm,      goarm: "6",          suffix: -v6        }
+          - { goos: freebsd,   goarch: arm,      goarm: "7",          suffix: -v7        }
+          - { goos: freebsd,   goarch: arm64 }
+          - { goos: freebsd,   goarch: riscv64,  goriscv64: rva20u64, suffix: -rva20u64  }
+          - { goos: freebsd,   goarch: riscv64,  goriscv64: rva22u64, suffix: -rva22u64  }
+          # illumos
+          - { goos: illumos,   goarch: amd64,    goamd64: v1,         suffix: -v1        }
+          - { goos: illumos,   goarch: amd64,    goamd64: v2,         suffix: -v2        }
+          - { goos: illumos,   goarch: amd64,    goamd64: v3,         suffix: -v3        }
+          - { goos: illumos,   goarch: amd64,    goamd64: v4,         suffix: -v4        }
+          # ios
+          - { goos: ios,       goarch: amd64,    goamd64: v1,         suffix: -v1        }
+          - { goos: ios,       goarch: amd64,    goamd64: v2,         suffix: -v2        }
+          - { goos: ios,       goarch: amd64,    goamd64: v3,         suffix: -v3        }
+          - { goos: ios,       goarch: amd64,    goamd64: v4,         suffix: -v4        }
+          - { goos: ios,       goarch: arm64 }
+          # js
+          - { goos: js,        goarch: wasm }
+          # linux
+          - { goos: linux,     goarch: "386",    go386: sse2,         suffix: -sse2      }
+          - { goos: linux,     goarch: "386",    go386: softfloat,    suffix: -softfloat }
+          - { goos: linux,     goarch: amd64,    goamd64: v1,         suffix: -v1        }
+          - { goos: linux,     goarch: amd64,    goamd64: v2,         suffix: -v2        }
+          - { goos: linux,     goarch: amd64,    goamd64: v3,         suffix: -v3        }
+          - { goos: linux,     goarch: amd64,    goamd64: v4,         suffix: -v4        }
+          - { goos: linux,     goarch: arm,      goarm: "5",          suffix: -v5        }
+          - { goos: linux,     goarch: arm,      goarm: "6",          suffix: -v6        }
+          - { goos: linux,     goarch: arm,      goarm: "7",          suffix: -v7        }
+          - { goos: linux,     goarch: arm64 }
+          - { goos: linux,     goarch: loong64 }
+          - { goos: linux,     goarch: mips,     gomips: hardfloat,   suffix: -hardfloat }
+          - { goos: linux,     goarch: mips,     gomips: softfloat,   suffix: -softfloat }
+          - { goos: linux,     goarch: mips64,   gomips64: hardfloat, suffix: -hardfloat }
+          - { goos: linux,     goarch: mips64,   gomips64: softfloat, suffix: -softfloat }
+          - { goos: linux,     goarch: mips64le, gomips64: hardfloat, suffix: -hardfloat }
+          - { goos: linux,     goarch: mips64le, gomips64: softfloat, suffix: -softfloat }
+          - { goos: linux,     goarch: mipsle,   gomips: hardfloat,   suffix: -hardfloat }
+          - { goos: linux,     goarch: mipsle,   gomips: softfloat,   suffix: -softfloat }
+          - { goos: linux,     goarch: ppc64,    goppc64: power8,     suffix: -power8    }
+          - { goos: linux,     goarch: ppc64,    goppc64: power9,     suffix: -power9    }
+          - { goos: linux,     goarch: ppc64,    goppc64: power10,    suffix: -power10   }
+          - { goos: linux,     goarch: ppc64le,  goppc64: power8,     suffix: -power8    }
+          - { goos: linux,     goarch: ppc64le,  goppc64: power9,     suffix: -power9    }
+          - { goos: linux,     goarch: ppc64le,  goppc64: power10,    suffix: -power10   }
+          - { goos: linux,     goarch: riscv64,  goriscv64: rva20u64, suffix: -rva20u64  }
+          - { goos: linux,     goarch: riscv64,  goriscv64: rva22u64, suffix: -rva22u64  }
+          - { goos: linux,     goarch: s390x }
+          # netbsd
+          - { goos: netbsd,    goarch: "386",    go386: sse2,         suffix: -sse2      }
+          - { goos: netbsd,    goarch: "386",    go386: softfloat,    suffix: -softfloat }
+          - { goos: netbsd,    goarch: amd64,    goamd64: v1,         suffix: -v1        }
+          - { goos: netbsd,    goarch: amd64,    goamd64: v2,         suffix: -v2        }
+          - { goos: netbsd,    goarch: amd64,    goamd64: v3,         suffix: -v3        }
+          - { goos: netbsd,    goarch: amd64,    goamd64: v4,         suffix: -v4        }
+          - { goos: netbsd,    goarch: arm,      goarm: "5",          suffix: -v5        }
+          - { goos: netbsd,    goarch: arm,      goarm: "6",          suffix: -v6        }
+          - { goos: netbsd,    goarch: arm,      goarm: "7",          suffix: -v7        }
+          - { goos: netbsd,    goarch: arm64 }
+          # openbsd
+          - { goos: openbsd,   goarch: "386",    go386: sse2,         suffix: -sse2      }
+          - { goos: openbsd,   goarch: "386",    go386: softfloat,    suffix: -softfloat }
+          - { goos: openbsd,   goarch: amd64,    goamd64: v1,         suffix: -v1        }
+          - { goos: openbsd,   goarch: amd64,    goamd64: v2,         suffix: -v2        }
+          - { goos: openbsd,   goarch: amd64,    goamd64: v3,         suffix: -v3        }
+          - { goos: openbsd,   goarch: amd64,    goamd64: v4,         suffix: -v4        }
+          - { goos: openbsd,   goarch: arm,      goarm: "5",          suffix: -v5        }
+          - { goos: openbsd,   goarch: arm,      goarm: "6",          suffix: -v6        }
+          - { goos: openbsd,   goarch: arm,      goarm: "7",          suffix: -v7        }
+          - { goos: openbsd,   goarch: arm64 }
+          - { goos: openbsd,   goarch: ppc64,    goppc64: power8,     suffix: -power8    }
+          - { goos: openbsd,   goarch: ppc64,    goppc64: power9,     suffix: -power9    }
+          - { goos: openbsd,   goarch: ppc64,    goppc64: power10,    suffix: -power10   }
+          - { goos: openbsd,   goarch: riscv64,  goriscv64: rva20u64, suffix: -rva20u64  }
+          - { goos: openbsd,   goarch: riscv64,  goriscv64: rva22u64, suffix: -rva22u64  }
+          # plan9
+          - { goos: plan9,     goarch: "386",    go386: sse2,         suffix: -sse2      }
+          - { goos: plan9,     goarch: "386",    go386: softfloat,    suffix: -softfloat }
+          - { goos: plan9,     goarch: amd64,    goamd64: v1,         suffix: -v1        }
+          - { goos: plan9,     goarch: amd64,    goamd64: v2,         suffix: -v2        }
+          - { goos: plan9,     goarch: amd64,    goamd64: v3,         suffix: -v3        }
+          - { goos: plan9,     goarch: amd64,    goamd64: v4,         suffix: -v4        }
+          - { goos: plan9,     goarch: arm,      goarm: "5",          suffix: -v5        }
+          - { goos: plan9,     goarch: arm,      goarm: "6",          suffix: -v6        }
+          - { goos: plan9,     goarch: arm,      goarm: "7",          suffix: -v7        }
+          # solaris
+          - { goos: solaris,   goarch: amd64,    goamd64: v1,         suffix: -v1        }
+          - { goos: solaris,   goarch: amd64,    goamd64: v2,         suffix: -v2        }
+          - { goos: solaris,   goarch: amd64,    goamd64: v3,         suffix: -v3        }
+          - { goos: solaris,   goarch: amd64,    goamd64: v4,         suffix: -v4        }
+          # wasip1
+          - { goos: wasip1,    goarch: wasm }
+          # windows
+          - { goos: windows,   goarch: "386",    go386: sse2,         suffix: -sse2      }
+          - { goos: windows,   goarch: "386",    go386: softfloat,    suffix: -softfloat }
+          - { goos: windows,   goarch: amd64,    goamd64: v1,         suffix: -v1        }
+          - { goos: windows,   goarch: amd64,    goamd64: v2,         suffix: -v2        }
+          - { goos: windows,   goarch: amd64,    goamd64: v3,         suffix: -v3        }
+          - { goos: windows,   goarch: amd64,    goamd64: v4,         suffix: -v4        }
+          - { goos: windows,   goarch: arm64 }
 
     steps:
       - name: Checkout code
@@ -21,41 +159,41 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Build Linux amd64
-        run: GOOS=linux GOARCH=amd64 go build -o vibeshitcraft-linux-amd64 ./cmd/server/
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
+          GOAMD64: ${{ matrix.goamd64 }}
+          GO386: ${{ matrix.go386 }}
+          GOMIPS: ${{ matrix.gomips }}
+          GOMIPS64: ${{ matrix.gomips64 }}
+          GOPPC64: ${{ matrix.goppc64 }}
+          GORISCV64: ${{ matrix.goriscv64 }}
+        run: |
+          EXT=""
+          if [ "${{ matrix.goos }}" = "windows" ]; then EXT=".exe"; fi
+          if [ "${{ matrix.goos }}" = "js" ] || [ "${{ matrix.goos }}" = "wasip1" ]; then EXT=".wasm"; fi
+          NAME="vibeshitcraft-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}${EXT}"
+          go build -o "${NAME}" ./cmd/server/
+          echo "BINARY_NAME=${NAME}" >> $GITHUB_ENV
 
-      - name: Build Linux x86
-        run: GOOS=linux GOARCH=386 go build -o vibeshitcraft-linux-x86 ./cmd/server/
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.suffix }}
+          path: ${{ env.BINARY_NAME }}
 
-      - name: Build Linux ARM64
-        run: GOOS=linux GOARCH=arm64 go build -o vibeshitcraft-linux-arm64 ./cmd/server/
+  release:
+    needs: build
+    runs-on: ubuntu-latest
 
-      - name: Build Linux ARMv7
-        run: GOOS=linux GOARCH=arm GOARM=7 go build -o vibeshitcraft-linux-armv7 ./cmd/server/
-
-      - name: Build Linux MIPSLE softfloat
-        run: GOOS=linux GOARCH=mipsle GOMIPS=softfloat go build -o vibeshitcraft-linux-mipsle-softfloat ./cmd/server/
-
-      - name: Build Linux MIPSBE
-        run: GOOS=linux GOARCH=mips go build -o vibeshitcraft-linux-mipsbe ./cmd/server/
-
-      - name: Build Linux ppc64
-        run: GOOS=linux GOARCH=ppc64 GOPPC64=power8 go build -o vibeshitcraft-linux-ppc64 ./cmd/server/
-
-      - name: Build Linux ppc64le
-        run: GOOS=linux GOARCH=ppc64le go build -o vibeshitcraft-linux-ppc64le ./cmd/server/
-
-      - name: Build Windows amd64
-        run: GOOS=windows GOARCH=amd64 go build -o vibeshitcraft-windows-amd64.exe ./cmd/server/
-
-      - name: Build Windows x86
-        run: GOOS=windows GOARCH=386 go build -o vibeshitcraft-windows-x86.exe ./cmd/server/
-
-      - name: Build macOS amd64
-        run: GOOS=darwin GOARCH=amd64 go build -o vibeshitcraft-darwin-amd64 ./cmd/server/
-
-      - name: Build macOS ARM64
-        run: GOOS=darwin GOARCH=arm64 go build -o vibeshitcraft-darwin-arm64 ./cmd/server/
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
 
       - name: Compute padded run number
         id: padded
@@ -67,17 +205,5 @@ jobs:
           tag_name: build-${{ steps.padded.outputs.run_number }}
           name: Build ${{ github.run_number }} from ${{ github.ref_name }}
           body: "Built from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})"
-          files: |
-            vibeshitcraft-linux-amd64
-            vibeshitcraft-linux-x86
-            vibeshitcraft-linux-arm64
-            vibeshitcraft-linux-armv7
-            vibeshitcraft-linux-mipsle-softfloat
-            vibeshitcraft-linux-mipsbe
-            vibeshitcraft-linux-ppc64
-            vibeshitcraft-linux-ppc64le
-            vibeshitcraft-windows-amd64.exe
-            vibeshitcraft-windows-x86.exe
-            vibeshitcraft-darwin-amd64
-            vibeshitcraft-darwin-arm64
+          files: artifacts/*
           make_latest: true
