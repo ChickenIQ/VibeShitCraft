@@ -137,23 +137,23 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 	// Block IDs (state = id << 4)
 	const (
 		air        = 0
-		log        = 17 << 4 // oak log
-		cobble     = 4 << 4  // cobblestone
-		planks     = 5 << 4  // oak planks
-		gravel     = 13 << 4 // gravel (path)
-		glass      = 20 << 4 // glass pane (window)
-		fence      = 85 << 4 // oak fence
-		stoneBrick = 98 << 4 // stone bricks (well walls)
+		log        = 17 << 4  // oak log
+		cobble     = 4 << 4   // cobblestone
+		planks     = 5 << 4   // oak planks
+		gravel     = 13 << 4  // gravel (path)
+		glass      = 20 << 4  // glass pane (window)
+		fence      = 85 << 4  // oak fence
+		stoneBrick = 98 << 4  // stone bricks (well walls)
 		cobbleWall = 139 << 4 // cobblestone wall
-		waterSrc   = 9 << 4  // water (stationary)
-		torch      = 50 << 4 // torch
-		slab       = 44 << 4 // stone slab
-		oakStairs  = 53 << 4 // oak stairs
-		woodenDoor = 64 << 4 // wooden door
-		farmland   = 60 << 4 // farmland
-		wheat      = 59 << 4 // wheat (id 59)
-		dandelion  = 37 << 4 // dandelion flower
-		poppy      = 38 << 4 // poppy flower
+		waterSrc   = 9 << 4   // water (stationary)
+		torch      = 50 << 4  // torch
+		slab       = 44 << 4  // stone slab
+		oakStairs  = 53 << 4  // oak stairs
+		woodenDoor = 64 << 4  // wooden door
+		farmland   = 60 << 4  // farmland
+		wheat      = 59 << 4  // wheat (id 59)
+		dandelion  = 37 << 4  // dandelion flower
+		poppy      = 38 << 4  // poppy flower
 	)
 
 	placeBlock := func(wx, y, wz int, state uint16) {
@@ -172,7 +172,7 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		sec := y / 16
 		sy := y % 16
 		currentState := sections[sec][(sy*16+lz)*16+lx]
-		return (currentState >> 4) == 0 || (currentState >> 4) == 13 // Air (0) or Gravel (13)
+		return (currentState>>4) == 0 || (currentState>>4) == 13 // Air (0) or Gravel (13)
 	}
 
 	placeDecoration := func(wx, y, wz int, state uint16) {
@@ -261,6 +261,9 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 	// Farms
 	v.buildFarm(vx-22, vz+12, surfY, placeBlock, log, waterSrc, farmland, wheat)
 	v.buildFarm(vx+6, vz-22, surfY, placeBlock, log, waterSrc, farmland, wheat)
+
+	// Church (at West)
+	v.buildChurch(vx-18, vz-18, surfY, placeBlock, log, planks, cobble, glass, torch, oakStairs, woodenDoor, slab, air)
 
 	// ------------------------------------------------------------------
 	// 4. Decorations: Flowers & Lamp Posts
@@ -492,4 +495,136 @@ func (v *VillageGrid) buildHouse(hx, hz, surfY, houseIdx int, place func(wx, y, 
 			}
 		}
 	}
+}
+
+// buildChurch creates a classic L-shaped village church with a tower.
+func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, torch, stairs, door, slab, air uint16) {
+	// Footprint split into two areas:
+	// Tower: [0, 5) x [0, 5)
+	// Hall:  [0, 5) x [4, 11) (Overlaps at dz=4)
+	const towerMaxX, towerMaxZ = 4, 4
+	const hallMaxX, hallMaxZ = 4, 10
+	const hallHeight = 4
+	const towerHeight = 11
+
+	// 1. Tower Construction
+	for dx := 0; dx <= towerMaxX; dx++ {
+		for dz := 0; dz <= towerMaxZ; dz++ {
+			isWallX := dx == 0 || dx == towerMaxX
+			isWallZ := dz == 0 || dz == towerMaxZ
+			isCorner := isWallX && isWallZ
+
+			for dy := 0; dy <= towerHeight; dy++ {
+				if dy == 0 {
+					place(hx+dx, surfY+dy, hz+dz, cobble) // Foundation
+				} else if dy == 1 && dx > 0 && dx < towerMaxX && dz > 0 && dz < towerMaxZ {
+					place(hx+dx, surfY+dy, hz+dz, cobble) // Floor
+				} else if isCorner {
+					place(hx+dx, surfY+dy, hz+dz, log) // Corner posts
+				} else if isWallX || (isWallZ && (dy > hallHeight || dz == 0)) {
+					// Walls
+					block := cobble
+					// Door and Cross at front
+					if dz == 0 {
+						if dx == 2 {
+							if dy == 1 {
+								block = door | 3
+							} else if dy == 2 {
+								block = door | 8
+							} else if dy >= 5 && dy <= 7 {
+								block = glass
+							}
+						} else if (dx == 1 || dx == 3) && dy == 6 {
+							block = glass
+						}
+					}
+					// Upper windows
+					if dy == towerHeight-2 && (isWallX || dz == 0) {
+						block = glass
+					}
+					place(hx+dx, surfY+dy, hz+dz, block)
+				} else {
+					place(hx+dx, surfY+dy, hz+dz, air) // Hollow interior
+				}
+			}
+			// Tower Roof
+			place(hx+dx, surfY+towerHeight+1, hz+dz, cobble)
+		}
+	}
+
+	// 2. Hall Construction
+	for dx := 0; dx <= hallMaxX; dx++ {
+		for dz := 5; dz <= hallMaxZ; dz++ {
+			isWallX := dx == 0 || dx == hallMaxX
+			isWallZ := dz == hallMaxZ
+			isCorner := isWallX && (dz == hallMaxZ)
+
+			for dy := 0; dy <= hallHeight; dy++ {
+				if dy == 0 {
+					place(hx+dx, surfY+dy, hz+dz, cobble) // Foundation
+				} else if dy == 1 && dx > 0 && dx < hallMaxX && dz < hallMaxZ {
+					place(hx+dx, surfY+dy, hz+dz, cobble) // Floor
+				} else if isCorner {
+					place(hx+dx, surfY+dy, hz+dz, log) // Back corners
+				} else if isWallX || isWallZ {
+					block := cobble
+					// Windows
+					if dy == 2 || dy == 3 {
+						if isWallX && (dz == 6 || dz == 8) {
+							block = glass
+						} else if isWallZ && dx == 2 {
+							block = glass
+						}
+					}
+					place(hx+dx, surfY+dy, hz+dz, block)
+				} else {
+					place(hx+dx, surfY+dy, hz+dz, air)
+				}
+			}
+		}
+	}
+
+	// 3. Hall Gables and Roof
+	for dz := 4; dz <= hallMaxZ; dz++ {
+		// Back Gable (dz=10)
+		if dz == hallMaxZ {
+			place(hx+1, surfY+hallHeight+1, hz+dz, cobble)
+			place(hx+2, surfY+hallHeight+1, hz+dz, cobble)
+			place(hx+3, surfY+hallHeight+1, hz+dz, cobble)
+			place(hx+2, surfY+hallHeight+2, hz+dz, cobble)
+		}
+
+		// Slopes
+		place(hx-1, surfY+hallHeight+1, hz+dz, stairs|0)
+		place(hx+hallMaxX+1, surfY+hallHeight+1, hz+dz, stairs|1)
+
+		place(hx, surfY+hallHeight+1, hz+dz, cobble)
+		place(hx, surfY+hallHeight+2, hz+dz, stairs|0)
+
+		place(hx+hallMaxX, surfY+hallHeight+1, hz+dz, cobble)
+		place(hx+hallMaxX, surfY+hallHeight+2, hz+dz, stairs|1)
+
+		place(hx+1, surfY+hallHeight+2, hz+dz, cobble)
+		place(hx+1, surfY+hallHeight+3, hz+dz, stairs|0)
+
+		place(hx+hallMaxX-1, surfY+hallHeight+2, hz+dz, cobble)
+		place(hx+hallMaxX-1, surfY+hallHeight+3, hz+dz, stairs|1)
+
+		// Ridge
+		place(hx+2, surfY+hallHeight+3, hz+dz, cobble)
+		place(hx+2, surfY+hallHeight+4, hz+dz, slab)
+	}
+
+	// 4. Steeple
+	place(hx+2, surfY+towerHeight+2, hz+2, cobble)
+	place(hx+2, surfY+towerHeight+3, hz+2, 85<<4) // Fence
+	place(hx+2, surfY+towerHeight+4, hz+2, 85<<4) // Fence
+
+	// 5. Interior Furniture
+	for dz := 6; dz <= 8; dz += 2 {
+		place(hx+1, surfY+2, hz+dz, stairs|0)
+		place(hx+3, surfY+2, hz+dz, stairs|1)
+	}
+	place(hx+2, surfY+2, hz+hallMaxZ-1, cobble) // Altar
+	place(hx+2, surfY+3, hz+hallMaxZ-1, torch|5)
 }
