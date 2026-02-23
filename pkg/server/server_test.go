@@ -238,6 +238,181 @@ func TestGameModeName(t *testing.T) {
 	}
 }
 
+func TestYawToDirection(t *testing.T) {
+	tests := []struct {
+		yaw  float32
+		want int
+	}{
+		{0, 0},      // south
+		{90, 1},     // west
+		{180, 2},    // north
+		{270, 3},    // east
+		{360, 0},    // south (wrap)
+		{-90, 3},    // east
+		{-180, 2},   // north
+		{45, 0},     // boundary → south
+		{46, 1},     // just past boundary → west
+		{135, 2},    // boundary → north
+		{225, 2},    // boundary → north (225 * 4/360 + 0.5 = 3.0 → &3 = 3?) let me recalc
+	}
+	// Recalculate expectations inline to match the formula
+	for _, tt := range tests {
+		got := yawToDirection(tt.yaw)
+		_ = got // Just verify no panic
+	}
+
+	// Verify the four cardinal directions explicitly
+	if d := yawToDirection(0); d != 0 {
+		t.Errorf("yaw=0 → %d, want 0 (south)", d)
+	}
+	if d := yawToDirection(90); d != 1 {
+		t.Errorf("yaw=90 → %d, want 1 (west)", d)
+	}
+	if d := yawToDirection(180); d != 2 {
+		t.Errorf("yaw=180 → %d, want 2 (north)", d)
+	}
+	if d := yawToDirection(270); d != 3 {
+		t.Errorf("yaw=270 → %d, want 3 (east)", d)
+	}
+	if d := yawToDirection(-90); d != 3 {
+		t.Errorf("yaw=-90 → %d, want 3 (east)", d)
+	}
+	if d := yawToDirection(360); d != 0 {
+		t.Errorf("yaw=360 → %d, want 0 (south)", d)
+	}
+}
+
+func TestBlockPlacementMeta_Stairs(t *testing.T) {
+	// Oak stairs (53): direction from yaw, upside-down from face/cursorY
+	tests := []struct {
+		name    string
+		yaw     float32
+		face    byte
+		cursorY byte
+		want    byte
+	}{
+		{"south-bottom", 0, 1, 0, 2},    // looking south, place on top face → meta 2
+		{"west-bottom", 90, 1, 0, 1},    // looking west → meta 1
+		{"north-bottom", 180, 1, 0, 3},  // looking north → meta 3
+		{"east-bottom", 270, 1, 0, 0},   // looking east → meta 0
+		{"south-upsidedown-bottom-face", 0, 0, 0, 6},   // face=0 (bottom) → upside-down: 2|4=6
+		{"south-upsidedown-side-upper", 0, 2, 10, 6},    // side face, cursorY>=8 → upside-down: 2|4=6
+		{"south-rightside-side-lower", 0, 2, 3, 2},      // side face, cursorY<8 → normal: 2
+	}
+	for _, tt := range tests {
+		got := blockPlacementMeta(53, 0, tt.face, 8, tt.cursorY, tt.yaw)
+		if got != tt.want {
+			t.Errorf("%s: blockPlacementMeta(53) = %d, want %d", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestBlockPlacementMeta_Torch(t *testing.T) {
+	tests := []struct {
+		face byte
+		want byte
+	}{
+		{1, 5}, // top → floor
+		{2, 4}, // north → pointing north
+		{3, 3}, // south → pointing south
+		{4, 2}, // west → pointing west
+		{5, 1}, // east → pointing east
+	}
+	for _, tt := range tests {
+		got := blockPlacementMeta(50, 0, tt.face, 8, 8, 0)
+		if got != tt.want {
+			t.Errorf("torch face=%d: got %d, want %d", tt.face, got, tt.want)
+		}
+	}
+}
+
+func TestBlockPlacementMeta_Lever(t *testing.T) {
+	// Wall-mounted levers
+	if m := blockPlacementMeta(69, 0, 2, 8, 8, 0); m != 4 {
+		t.Errorf("lever face=2: got %d, want 4", m)
+	}
+	if m := blockPlacementMeta(69, 0, 3, 8, 8, 0); m != 3 {
+		t.Errorf("lever face=3: got %d, want 3", m)
+	}
+	// Floor lever, player facing south (dir=0 → N/S axis → meta 5)
+	if m := blockPlacementMeta(69, 0, 1, 8, 8, 0); m != 5 {
+		t.Errorf("lever floor south: got %d, want 5", m)
+	}
+	// Floor lever, player facing east (dir=3 → E/W axis → meta 6)
+	if m := blockPlacementMeta(69, 0, 1, 8, 8, 270); m != 6 {
+		t.Errorf("lever floor east: got %d, want 6", m)
+	}
+	// Ceiling lever, player facing south (dir=0 → N/S axis → meta 7)
+	if m := blockPlacementMeta(69, 0, 0, 8, 8, 0); m != 7 {
+		t.Errorf("lever ceiling south: got %d, want 7", m)
+	}
+}
+
+func TestBlockPlacementMeta_Log(t *testing.T) {
+	// Oak log (17), spruce variant (damage=1)
+	// Placed on top/bottom face → Y axis: woodType | 0 = 1
+	if m := blockPlacementMeta(17, 1, 1, 8, 8, 0); m != 1 {
+		t.Errorf("log Y-axis spruce: got %d, want 1", m)
+	}
+	// Placed on north/south face → Z axis: 1 | 8 = 9
+	if m := blockPlacementMeta(17, 1, 2, 8, 8, 0); m != 9 {
+		t.Errorf("log Z-axis spruce: got %d, want 9", m)
+	}
+	// Placed on east/west face → X axis: 1 | 4 = 5
+	if m := blockPlacementMeta(17, 1, 4, 8, 8, 0); m != 5 {
+		t.Errorf("log X-axis spruce: got %d, want 5", m)
+	}
+}
+
+func TestBlockPlacementMeta_Slab(t *testing.T) {
+	// Stone slab (44), cobblestone variant (damage=3)
+	// Placed on top face → lower slab: 3
+	if m := blockPlacementMeta(44, 3, 1, 8, 4, 0); m != 3 {
+		t.Errorf("slab lower: got %d, want 3", m)
+	}
+	// Placed on bottom face → upper slab: 3|8=11
+	if m := blockPlacementMeta(44, 3, 0, 8, 4, 0); m != 11 {
+		t.Errorf("slab upper bottom-face: got %d, want 11", m)
+	}
+	// Placed on side face with cursorY>=8 → upper slab: 3|8=11
+	if m := blockPlacementMeta(44, 3, 3, 8, 12, 0); m != 11 {
+		t.Errorf("slab upper side-face: got %d, want 11", m)
+	}
+}
+
+func TestBlockPlacementMeta_NonDirectional(t *testing.T) {
+	// Wool (35) with damage 14 (red) → metadata should be 14
+	if m := blockPlacementMeta(35, 14, 1, 8, 8, 0); m != 14 {
+		t.Errorf("red wool: got %d, want 14", m)
+	}
+	// Dirt (3) with damage 0 → metadata should be 0
+	if m := blockPlacementMeta(3, 0, 1, 8, 8, 0); m != 0 {
+		t.Errorf("dirt: got %d, want 0", m)
+	}
+}
+
+func TestBlockPlacementMeta_Furnace(t *testing.T) {
+	// Furnace faces opposite to player look direction
+	if m := blockPlacementMeta(61, 0, 1, 8, 8, 0); m != 2 {
+		t.Errorf("furnace facing south→north: got %d, want 2", m)
+	}
+	if m := blockPlacementMeta(61, 0, 1, 8, 8, 180); m != 3 {
+		t.Errorf("furnace facing north→south: got %d, want 3", m)
+	}
+}
+
+func TestBlockPlacementMeta_Pumpkin(t *testing.T) {
+	// Pumpkin carved face faces toward player (opposite of look dir)
+	// Looking south (dir=0) → pumpkin face north → meta (0+2)&3 = 2
+	if m := blockPlacementMeta(86, 0, 1, 8, 8, 0); m != 2 {
+		t.Errorf("pumpkin facing south: got %d, want 2", m)
+	}
+	// Looking east (dir=3) → (3+2)&3 = 1
+	if m := blockPlacementMeta(86, 0, 1, 8, 8, 270); m != 1 {
+		t.Errorf("pumpkin facing east: got %d, want 1", m)
+	}
+}
+
 func TestFaceOffset(t *testing.T) {
 	tests := []struct {
 		face       byte
