@@ -364,3 +364,110 @@ func TestSpawnItemEntityTracking(t *testing.T) {
 		}
 	}
 }
+
+func TestEntityGravityItemFalls(t *testing.T) {
+	srv := New(Config{Address: "127.0.0.1:0", MaxPlayers: 10, MOTD: "Test"})
+
+	// Spawn item high in the air with no velocity
+	srv.SpawnItem(8.5, 100.0, 8.5, 0, 0, 0, 4, 0, 1)
+
+	srv.mu.RLock()
+	var item *ItemEntity
+	for _, e := range srv.entities {
+		item = e
+	}
+	srv.mu.RUnlock()
+
+	startY := item.Y
+
+	// Run a few physics ticks
+	for i := 0; i < 5; i++ {
+		srv.tickEntityPhysics()
+	}
+
+	srv.mu.RLock()
+	endY := item.Y
+	srv.mu.RUnlock()
+
+	if endY >= startY {
+		t.Errorf("item should have fallen: startY=%f, endY=%f", startY, endY)
+	}
+}
+
+func TestEntityGravityMobFalls(t *testing.T) {
+	srv := New(Config{Address: "127.0.0.1:0", MaxPlayers: 10, MOTD: "Test"})
+
+	// Spawn mob high in the air
+	srv.SpawnMob(8.5, 100.0, 8.5, 0, 0, 90)
+
+	srv.mu.RLock()
+	var mob *MobEntity
+	for _, m := range srv.mobs {
+		mob = m
+	}
+	srv.mu.RUnlock()
+
+	startY := mob.Y
+
+	for i := 0; i < 5; i++ {
+		srv.tickEntityPhysics()
+	}
+
+	srv.mu.RLock()
+	endY := mob.Y
+	srv.mu.RUnlock()
+
+	if endY >= startY {
+		t.Errorf("mob should have fallen: startY=%f, endY=%f", startY, endY)
+	}
+}
+
+func TestEntityGravityStopsOnGround(t *testing.T) {
+	srv := New(Config{Address: "127.0.0.1:0", MaxPlayers: 10, MOTD: "Test", Seed: 12345})
+
+	// Find the surface height at (8, 8) and spawn item just above it
+	surfaceY := float64(srv.world.Gen.SurfaceHeight(8, 8)) + 2.0
+	srv.SpawnItem(8.5, surfaceY, 8.5, 0, 0, 0, 4, 0, 1)
+
+	// Run many ticks to let it settle
+	for i := 0; i < 100; i++ {
+		srv.tickEntityPhysics()
+	}
+
+	srv.mu.RLock()
+	var item *ItemEntity
+	for _, e := range srv.entities {
+		item = e
+	}
+	vy := item.VY
+	y := item.Y
+	srv.mu.RUnlock()
+
+	// Item should have settled - velocity should be zero and Y should be above 0
+	if vy != 0 {
+		t.Errorf("item VY should be 0 after settling, got %f", vy)
+	}
+	if y <= 0 {
+		t.Errorf("item Y should be above 0, got %f", y)
+	}
+}
+
+func TestEntityGravityDoesNotAffectPlayers(t *testing.T) {
+	srv := New(Config{Address: "127.0.0.1:0", MaxPlayers: 10, MOTD: "Test"})
+
+	// tickEntityPhysics only affects entities and mobs, not players
+	// Just verify that the function runs without error and no player map entries are modified
+	srv.mu.Lock()
+	srv.players[1] = &Player{EntityID: 1, X: 8.5, Y: 100.0, Z: 8.5}
+	srv.mu.Unlock()
+
+	srv.tickEntityPhysics()
+
+	srv.mu.RLock()
+	p := srv.players[1]
+	srv.mu.RUnlock()
+
+	if p.Y != 100.0 {
+		t.Errorf("player Y should not change, got %f", p.Y)
+	}
+}

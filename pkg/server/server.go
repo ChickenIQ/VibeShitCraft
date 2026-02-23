@@ -79,11 +79,12 @@ type ItemEntity struct {
 
 // MobEntity represents a spawned mob in the world.
 type MobEntity struct {
-	EntityID int32
-	TypeID   byte // Minecraft entity type ID (e.g. 50=Creeper, 90=Pig)
-	X, Y, Z  float64
-	Yaw      float32
-	Pitch    float32
+	EntityID   int32
+	TypeID     byte // Minecraft entity type ID (e.g. 50=Creeper, 90=Pig)
+	X, Y, Z    float64
+	Yaw        float32
+	Pitch      float32
+	VX, VY, VZ float64 // Velocity tracking for gravity
 }
 
 // SpawnEggItemID is the item ID for spawn eggs in MC 1.8.
@@ -159,6 +160,7 @@ func (s *Server) Start() error {
 	log.Printf("Server listening on %s", s.config.Address)
 
 	go s.acceptLoop()
+	go s.entityPhysicsLoop()
 	return nil
 }
 
@@ -173,6 +175,165 @@ func (s *Server) Stop() {
 		p.Conn.Close()
 	}
 	s.mu.RUnlock()
+}
+
+func (s *Server) entityPhysicsLoop() {
+	ticker := time.NewTicker(50 * time.Millisecond) // 20 ticks per second
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			s.tickEntityPhysics()
+		}
+	}
+}
+
+func (s *Server) tickEntityPhysics() {
+	const gravity = 0.04
+	const drag = 0.98
+	const groundDrag = 0.5
+
+	s.mu.Lock()
+
+	// Collect entities that moved so we can broadcast after releasing the lock
+	type movedItem struct {
+		entityID int32
+		x, y, z  float64
+	}
+	type movedMob struct {
+		entityID  int32
+		x, y, z   float64
+		yaw       float32
+		pitch     float32
+		onGround  bool
+	}
+	var movedItems []movedItem
+	var movedMobs []movedMob
+
+	for _, item := range s.entities {
+		if item.VX == 0 && item.VY == 0 && item.VZ == 0 {
+			// Check if entity is supported by ground
+			blockBelow := s.world.GetBlock(int32(math.Floor(item.X)), int32(math.Floor(item.Y-0.1)), int32(math.Floor(item.Z)))
+			if blockBelow>>4 != 0 {
+				continue
+			}
+			// Not on ground and no velocity - start falling
+		}
+
+		// Apply gravity
+		item.VY -= gravity
+
+		// Apply drag
+		item.VX *= drag
+		item.VY *= drag
+		item.VZ *= drag
+
+		// Calculate new position
+		newX := item.X + item.VX
+		newY := item.Y + item.VY
+		newZ := item.Z + item.VZ
+
+		// Ground collision check
+		blockAtNew := s.world.GetBlock(int32(math.Floor(newX)), int32(math.Floor(newY)), int32(math.Floor(newZ)))
+		if blockAtNew>>4 != 0 {
+			// Hit solid block - place on top
+			newY = math.Floor(newY) + 1.0
+			item.VY = 0
+			item.VX *= groundDrag
+			item.VZ *= groundDrag
+
+			// Stop tiny velocities
+			if math.Abs(item.VX) < 0.001 {
+				item.VX = 0
+			}
+			if math.Abs(item.VZ) < 0.001 {
+				item.VZ = 0
+			}
+		}
+
+		item.X = newX
+		item.Y = newY
+		item.Z = newZ
+
+		movedItems = append(movedItems, movedItem{item.EntityID, item.X, item.Y, item.Z})
+	}
+
+	for _, mob := range s.mobs {
+		if mob.VX == 0 && mob.VY == 0 && mob.VZ == 0 {
+			blockBelow := s.world.GetBlock(int32(math.Floor(mob.X)), int32(math.Floor(mob.Y-0.1)), int32(math.Floor(mob.Z)))
+			if blockBelow>>4 != 0 {
+				continue
+			}
+		}
+
+		mob.VY -= gravity
+
+		mob.VX *= drag
+		mob.VY *= drag
+		mob.VZ *= drag
+
+		newX := mob.X + mob.VX
+		newY := mob.Y + mob.VY
+		newZ := mob.Z + mob.VZ
+
+		onGround := false
+		blockAtNew := s.world.GetBlock(int32(math.Floor(newX)), int32(math.Floor(newY)), int32(math.Floor(newZ)))
+		if blockAtNew>>4 != 0 {
+			newY = math.Floor(newY) + 1.0
+			mob.VY = 0
+			mob.VX *= groundDrag
+			mob.VZ *= groundDrag
+			onGround = true
+
+			if math.Abs(mob.VX) < 0.001 {
+				mob.VX = 0
+			}
+			if math.Abs(mob.VZ) < 0.001 {
+				mob.VZ = 0
+			}
+		}
+
+		mob.X = newX
+		mob.Y = newY
+		mob.Z = newZ
+
+		movedMobs = append(movedMobs, movedMob{mob.EntityID, mob.X, mob.Y, mob.Z, mob.Yaw, mob.Pitch, onGround})
+	}
+
+	s.mu.Unlock()
+
+	// Broadcast entity teleport packets
+	for _, m := range movedItems {
+		s.broadcastEntityTeleportByID(m.entityID, m.x, m.y, m.z, 0, 0, true)
+	}
+	for _, m := range movedMobs {
+		s.broadcastEntityTeleportByID(m.entityID, m.x, m.y, m.z, m.yaw, m.pitch, m.onGround)
+	}
+}
+
+func (s *Server) broadcastEntityTeleportByID(entityID int32, x, y, z float64, yaw, pitch float32, onGround bool) {
+	pkt := protocol.MarshalPacket(0x18, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, entityID)
+		protocol.WriteInt32(w, int32(x*32))
+		protocol.WriteInt32(w, int32(y*32))
+		protocol.WriteInt32(w, int32(z*32))
+		protocol.WriteByte(w, byte(yaw*256/360))
+		protocol.WriteByte(w, byte(pitch*256/360))
+		protocol.WriteBool(w, onGround)
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		p.mu.Lock()
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
+		p.mu.Unlock()
+	}
 }
 
 func (s *Server) acceptLoop() {
