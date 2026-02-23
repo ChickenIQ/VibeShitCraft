@@ -91,8 +91,8 @@ func (g *Generator) generateTrees(chunkX, chunkZ int, sections *[SectionsPerChun
 
 			surfaceY := g.SurfaceHeight(wx, wz)
 
-			// Only on exposed surface above water
-			if surfaceY <= WaterLevel || surfaceY > 240 {
+			// Sanity-check height
+			if surfaceY > 240 {
 				continue
 			}
 
@@ -185,7 +185,7 @@ func (g *Generator) GenerateChunkData(chunkX, chunkZ int) ([]byte, uint16) {
 	// Fill block data per section — flat world
 	for lx := 0; lx < 16; lx++ {
 		for lz := 0; lz < 16; lz++ {
-			biomes[lz*16+lx] = 1 // Plains biome everywhere
+			biomes[lz*16+lx] = BiomeAt(g.tempNoise, g.rainNoise, chunkX*16+lx, chunkZ*16+lz).ID
 
 			for y := 0; y <= FlatSurfaceY; y++ {
 				sec := y / 16
@@ -203,6 +203,9 @@ func (g *Generator) GenerateChunkData(chunkX, chunkZ int) ([]byte, uint16) {
 			}
 		}
 	}
+
+	// Place trees on top of the terrain
+	g.generateTrees(chunkX, chunkZ, &sections)
 
 	// Serialize
 	return serializeSections(&sections, biomes)
