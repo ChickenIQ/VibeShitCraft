@@ -732,6 +732,9 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		player.mu.Lock()
 		player.ActiveSlot = slot
 		player.mu.Unlock()
+		// Inform other players about the newly selected held item so that
+		// they see the correct item in this player's hand.
+		s.broadcastHeldItem(player)
 
 	case 0x07: // Player Digging
 		status, _ := protocol.ReadByte(r)
@@ -1079,6 +1082,10 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			player.Inventory[slotNum] = Slot{ItemID: itemID, Count: count, Damage: damage}
 		}
 		player.mu.Unlock()
+
+		// Inventory contents have changed; if this touched the currently
+		// active hotbar slot, broadcast the updated held item.
+		s.broadcastHeldItem(player)
 
 	case 0x0E: // Click Window
 		_, _ = protocol.ReadByte(r) // window ID
@@ -1430,6 +1437,44 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		}
 
 		player.mu.Unlock()
+		// After any inventory manipulation, ensure other players see the
+		// correct held item for this player.
+		s.broadcastHeldItem(player)
+	}
+}
+
+// broadcastHeldItem sends an Entity Equipment packet (0x04) to all other
+// players so they see the correct item in the given player's hand.
+func (s *Server) broadcastHeldItem(player *Player) {
+	player.mu.Lock()
+	entityID := player.EntityID
+	activeSlot := int(player.ActiveSlot)
+	slotIndex := 36 + activeSlot
+	if activeSlot < 0 || slotIndex < 0 || slotIndex >= len(player.Inventory) {
+		player.mu.Unlock()
+		return
+	}
+	slot := player.Inventory[slotIndex]
+	player.mu.Unlock()
+
+	pkt := protocol.MarshalPacket(0x04, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, entityID)
+		// Slot 0 = item in hand in Minecraft 1.8
+		protocol.WriteInt16(w, 0)
+		protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, other := range s.players {
+		if other.EntityID == entityID {
+			continue
+		}
+		other.mu.Lock()
+		if other.Conn != nil {
+			protocol.WritePacket(other.Conn, pkt)
+		}
+		other.mu.Unlock()
 	}
 }
 
@@ -1650,6 +1695,17 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 	z := target.Z
 	yaw := target.Yaw
 	pitch := target.Pitch
+	// Determine the item ID currently held in the target's hand so the viewer
+	// immediately sees the correct held item model.
+	currentItemID := int16(0)
+	activeSlot := int(target.ActiveSlot)
+	slotIndex := 36 + activeSlot
+	if activeSlot >= 0 && slotIndex >= 0 && slotIndex < len(target.Inventory) {
+		held := target.Inventory[slotIndex]
+		if held.ItemID > 0 {
+			currentItemID = held.ItemID
+		}
+	}
 	target.mu.Unlock()
 
 	// Player List Item (Add Player) - 0x38
@@ -1676,7 +1732,8 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 		protocol.WriteInt32(w, int32(z*32)) // Fixed-point Z
 		protocol.WriteByte(w, byte(yaw*256/360))
 		protocol.WriteByte(w, byte(pitch*256/360))
-		protocol.WriteInt16(w, 0) // Current item
+		// Current item in hand (ID, not slot index)
+		protocol.WriteInt16(w, currentItemID)
 		// Minimal entity metadata so clients always receive a non-empty
 		// DataWatcher list for spawned players:
 		// Index 0, type 0 (byte) = entity flags, value 0
@@ -2553,6 +2610,10 @@ func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
 							s.broadcastCollectItem(e.EntityID, player.EntityID)
 							s.broadcastDestroyEntity(e.EntityID)
 							log.Printf("Player %s picked up item %d:%d", player.Username, e.ItemID, e.Damage)
+							// Picking up an item may have filled or stacked the
+							// currently selected hotbar slot; notify others so
+							// they see the updated held item.
+							s.broadcastHeldItem(player)
 						} else {
 							s.mu.Unlock()
 						}
