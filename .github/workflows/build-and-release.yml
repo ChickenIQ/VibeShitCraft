@@ -23,10 +23,14 @@ jobs:
       - name: Build
         run: go build -o vibeshitcraft ./cmd/server/
 
+      - name: Compute padded run number
+        id: padded
+        run: echo "run_number=$(printf '%06d' ${{ github.run_number }})" >> $GITHUB_OUTPUT
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ github.run_number }}
+          tag_name: build-${{ steps.padded.outputs.run_number }}
           name: Build ${{ github.run_number }} from ${{ github.ref_name }}
           body: "Built from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})"
           files: vibeshitcraft
