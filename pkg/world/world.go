@@ -184,6 +184,50 @@ func FlatWorldBlock(y int32) uint16 {
 	}
 }
 
+// IsInstantBreak returns true for blocks with zero hardness that the client
+// breaks with just a status=0 (start digging) packet in survival mode.
+func IsInstantBreak(blockID uint16) bool {
+	switch blockID {
+	case 6,  // sapling
+		27, 28,          // powered/detector rails
+		30,              // cobweb (actually not instant but low)
+		31, 32,          // tall grass, dead bush
+		37, 38, 39, 40,  // flowers, mushrooms
+		50,              // torch
+		51,              // fire
+		55,              // redstone wire
+		59,              // wheat
+		63, 68,          // sign post, wall sign
+		65,              // ladder
+		66,              // rail
+		69,              // lever
+		70, 72,          // stone/wooden pressure plate
+		75, 76,          // redstone torches
+		77,              // button
+		78,              // snow layer
+		83,              // sugar cane
+		90,              // nether portal
+		93, 94,          // repeater
+		106,             // vine
+		111,             // lily pad
+		115,             // nether wart
+		119, 120,        // end portal, end portal frame
+		131, 132,        // tripwire hook, tripwire
+		141, 142,        // carrot, potato
+		143,             // wooden button
+		144,             // head
+		147, 148,        // golden/stone pressure plate
+		149, 150,        // comparator
+		151,             // daylight sensor
+		154,             // hopper
+		157,             // activator rail
+		175,             // double plant (tall grass, etc.)
+		176, 177:        // banner (standing/wall)
+		return true
+	}
+	return false
+}
+
 // BlockToItemID returns the item ID, damage (metadata), and count that should be dropped when a block is broken.
 // Returns -1 for itemID if the block should not drop anything.
 func BlockToItemID(blockState uint16) (int16, int16, byte) {
@@ -259,6 +303,10 @@ func BlockToItemID(blockState uint16) (int16, int16, byte) {
 		return 175, metadata & 0x07, 1
 	case 53, 67, 108, 109, 114, 128, 134, 135, 136, 156, 163, 164, 180: // stairs
 		return int16(blockID), 0, 1 // Stairs item has no metadata for orientation
+	case 50: // torch -> drop torch item with no metadata
+		return 50, 0, 1
+	case 75, 76: // redstone torch (off/on) -> drop redstone torch item
+		return 76, 0, 1
 	case 16: // coal ore -> coal
 		return 263, 0, 1
 	case 56: // diamond ore -> diamond

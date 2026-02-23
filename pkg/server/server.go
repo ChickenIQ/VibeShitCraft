@@ -542,8 +542,15 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		if status == 0 && player.GameMode == GameModeCreative {
 			// Creative mode: instant break on start digging
 			s.handleBlockBreak(player, x, y, z)
-		} else if status == 2 { // Finished digging (survival)
+		} else if status == 2 {
+			// Survival: finished digging
 			s.handleBlockBreak(player, x, y, z)
+		} else if status == 0 && player.GameMode == GameModeSurvival {
+			// Survival: instant-break for zero-hardness blocks (torches, flowers, etc.)
+			blockState := s.world.GetBlock(x, y, z)
+			if world.IsInstantBreak(blockState >> 4) {
+				s.handleBlockBreak(player, x, y, z)
+			}
 		}
 
 	case 0x0A: // Animation
