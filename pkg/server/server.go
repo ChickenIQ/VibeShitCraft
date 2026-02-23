@@ -1214,13 +1214,8 @@ func (s *Server) sendEntityVelocity(player *Player, vx, vy, vz float64) {
 	})
 
 	player.mu.Lock()
-	err := protocol.WritePacket(player.Conn, pkt)
+	protocol.WritePacket(player.Conn, pkt)
 	player.mu.Unlock()
-	if err != nil {
-		log.Printf("Failed to write velocity packet: %v", err)
-	} else {
-		log.Printf("Successfully wrote velocity packet")
-	}
 }
 
 func (s *Server) handleRespawn(player *Player) {

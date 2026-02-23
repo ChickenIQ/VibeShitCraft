@@ -10,29 +10,30 @@ import (
 
 func TestHandleAttack(t *testing.T) {
 	s := New(DefaultConfig())
-	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	p1c1, p1c2 := net.Pipe()
+	p2c1, p2c2 := net.Pipe()
+	defer p1c1.Close()
+	defer p1c2.Close()
+	defer p2c1.Close()
+	defer p2c2.Close()
 
-	attacker := &Player{EntityID: 1, Username: "Attacker", Conn: c1, X: 0, Z: 0}
-	target := &Player{EntityID: 2, Username: "Target", Health: 20.0, IsDead: false, GameMode: GameModeSurvival, Conn: c2, X: 1, Z: 0}
+	attacker := &Player{EntityID: 1, Username: "Attacker", Conn: p1c1, X: 0, Z: 0}
+	target := &Player{EntityID: 2, Username: "Target", Health: 20.0, IsDead: false, GameMode: GameModeSurvival, Conn: p2c1, X: 1, Z: 0}
 
 	s.players[attacker.EntityID] = attacker
 	s.players[target.EntityID] = target
 
-	// Capture packets sent to target
+	// Capture packets sent to target (Server writes to target.Conn (p2c1), so we read from p2c2)
 	var receivedIDs []int32
 	receivedVelocity := false
 	done := make(chan bool, 1)
 	go func() {
 		for {
-			pkt, err := protocol.ReadPacket(c2)
+			pkt, err := protocol.ReadPacket(p2c2)
 			if err != nil {
-				t.Logf("ReadPacket error: %v", err)
 				close(done)
 				return
 			}
-			t.Logf("RECV ID: %d (0x%2X)", pkt.ID, pkt.ID)
 			receivedIDs = append(receivedIDs, pkt.ID)
 			if pkt.ID == 0x12 { // Entity Velocity
 				receivedVelocity = true
@@ -41,12 +42,10 @@ func TestHandleAttack(t *testing.T) {
 		}
 	}()
 
-	// Dummy reader for attacker to prevent blocking
+	// Dummy reader for attacker to prevent blocking (Server writes to attacker.Conn (p1c1), so we read from p1c2)
 	go func() {
-		buf := make([]byte, 2048)
 		for {
-			_, err := c1.Read(buf)
-			if err != nil {
+			if _, err := protocol.ReadPacket(p1c2); err != nil {
 				return
 			}
 		}
@@ -76,31 +75,30 @@ func TestHandleAttack(t *testing.T) {
 
 func TestHandleDeath(t *testing.T) {
 	s := New(DefaultConfig())
-	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	p1c1, p1c2 := net.Pipe()
+	p2c1, p2c2 := net.Pipe()
+	defer p1c1.Close()
+	defer p1c2.Close()
+	defer p2c1.Close()
+	defer p2c2.Close()
 
-	attacker := &Player{EntityID: 1, Username: "Attacker", Conn: c1}
-	target := &Player{EntityID: 2, Username: "Target", Health: 2.0, IsDead: false, GameMode: GameModeSurvival, Conn: c2}
+	attacker := &Player{EntityID: 1, Username: "Attacker", Conn: p1c1}
+	target := &Player{EntityID: 2, Username: "Target", Health: 2.0, IsDead: false, GameMode: GameModeSurvival, Conn: p2c1}
 
 	s.players[attacker.EntityID] = attacker
 	s.players[target.EntityID] = target
 
 	// Dummy readers
 	go func() {
-		buf := make([]byte, 2048)
 		for {
-			_, err := c1.Read(buf)
-			if err != nil {
+			if _, err := protocol.ReadPacket(p1c2); err != nil {
 				return
 			}
 		}
 	}()
 	go func() {
-		buf := make([]byte, 2048)
 		for {
-			_, err := c2.Read(buf)
-			if err != nil {
+			if _, err := protocol.ReadPacket(p2c2); err != nil {
 				return
 			}
 		}
@@ -134,10 +132,8 @@ func TestHandleRespawn(t *testing.T) {
 
 	// Dummy reader
 	go func() {
-		buf := make([]byte, 2048)
 		for {
-			_, err := c2.Read(buf)
-			if err != nil {
+			if _, err := protocol.ReadPacket(c2); err != nil {
 				return
 			}
 		}
@@ -155,31 +151,30 @@ func TestHandleRespawn(t *testing.T) {
 
 func TestCreativeNoDamage(t *testing.T) {
 	s := New(DefaultConfig())
-	c1, c2 := net.Pipe()
-	defer c1.Close()
-	defer c2.Close()
+	p1c1, p1c2 := net.Pipe()
+	p2c1, p2c2 := net.Pipe()
+	defer p1c1.Close()
+	defer p1c2.Close()
+	defer p2c1.Close()
+	defer p2c2.Close()
 
-	attacker := &Player{EntityID: 1, Username: "Attacker", Conn: c1}
-	target := &Player{EntityID: 2, Username: "Target", Health: 20.0, IsDead: false, GameMode: GameModeCreative, Conn: c2}
+	attacker := &Player{EntityID: 1, Username: "Attacker", Conn: p1c1}
+	target := &Player{EntityID: 2, Username: "Target", Health: 20.0, IsDead: false, GameMode: GameModeCreative, Conn: p2c1}
 
 	s.players[attacker.EntityID] = attacker
 	s.players[target.EntityID] = target
 
 	// Dummy readers
 	go func() {
-		buf := make([]byte, 2048)
 		for {
-			_, err := c1.Read(buf)
-			if err != nil {
+			if _, err := protocol.ReadPacket(p1c2); err != nil {
 				return
 			}
 		}
 	}()
 	go func() {
-		buf := make([]byte, 2048)
 		for {
-			_, err := c2.Read(buf)
-			if err != nil {
+			if _, err := protocol.ReadPacket(p2c2); err != nil {
 				return
 			}
 		}
