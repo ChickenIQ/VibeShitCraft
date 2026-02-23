@@ -94,7 +94,7 @@ type MobEntity struct {
 	HeadPitch  float32
 	OnGround   bool
 	// AIFunc is an optional AI callback invoked each tick. Can be nil.
-	AIFunc     func(mob *MobEntity, s *Server)
+	AIFunc func(mob *MobEntity, s *Server)
 }
 
 // Slot represents an inventory slot.
@@ -106,31 +106,31 @@ type Slot struct {
 
 // Player represents a connected player.
 type Player struct {
-	EntityID     int32
-	Username     string
-	UUID         [16]byte
-	Conn         net.Conn
-	State        int
-	GameMode     byte
-	X, Y, Z      float64
-	Yaw          float32
-	Pitch        float32
-	OnGround     bool
-	Health       float32
-	IsDead       bool
-	Inventory    [45]Slot
-	Cursor       Slot
-	ActiveSlot   int16
-	loadedChunks map[ChunkPos]bool
-	lastChunkX   int32
-	lastChunkZ   int32
-	CraftTableGrid   [9]Slot        // 3x3 crafting grid for crafting table window
-	CraftTableOutput Slot           // Crafting output for crafting table window
-	OpenWindowID     byte           // Currently open window ID (0 = none/player inventory)
-	NoClip       bool           // True when in spectator mode (can pass through blocks)
-	DragSlots    []int16        // Slots being dragged over in mode 5
-	DragButton   int            // 0=left drag, 1=right drag
-	mu           sync.Mutex
+	EntityID         int32
+	Username         string
+	UUID             [16]byte
+	Conn             net.Conn
+	State            int
+	GameMode         byte
+	X, Y, Z          float64
+	Yaw              float32
+	Pitch            float32
+	OnGround         bool
+	Health           float32
+	IsDead           bool
+	Inventory        [45]Slot
+	Cursor           Slot
+	ActiveSlot       int16
+	loadedChunks     map[ChunkPos]bool
+	lastChunkX       int32
+	lastChunkZ       int32
+	CraftTableGrid   [9]Slot // 3x3 crafting grid for crafting table window
+	CraftTableOutput Slot    // Crafting output for crafting table window
+	OpenWindowID     byte    // Currently open window ID (0 = none/player inventory)
+	NoClip           bool    // True when in spectator mode (can pass through blocks)
+	DragSlots        []int16 // Slots being dragged over in mode 5
+	DragButton       int     // 0=left drag, 1=right drag
+	mu               sync.Mutex
 }
 
 // New creates a new server with the given configuration.
@@ -1000,10 +1000,10 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			}
 			player.CraftTableOutput = Slot{ItemID: -1}
 			openPkt := protocol.MarshalPacket(0x2D, func(w *bytes.Buffer) {
-				protocol.WriteByte(w, 1)                             // Window ID
+				protocol.WriteByte(w, 1)                            // Window ID
 				protocol.WriteString(w, "minecraft:crafting_table") // Window Type
 				protocol.WriteString(w, `{"text":"Crafting"}`)      // Window Title
-				protocol.WriteByte(w, 0)                             // Number of Slots
+				protocol.WriteByte(w, 0)                            // Number of Slots
 			})
 			if player.Conn != nil {
 				protocol.WritePacket(player.Conn, openPkt)
@@ -1104,18 +1104,74 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			return
 		}
 
+		// Determine if the item is a door and map to its block ID
+		var isDoor bool
+		var placedBlockID int16 = itemID
+
+		switch itemID {
+		case 324:
+			placedBlockID = 64
+			isDoor = true
+		case 330:
+			placedBlockID = 71
+			isDoor = true
+		case 427:
+			placedBlockID = 193
+			isDoor = true
+		case 428:
+			placedBlockID = 194
+			isDoor = true
+		case 429:
+			placedBlockID = 195
+			isDoor = true
+		case 430:
+			placedBlockID = 196
+			isDoor = true
+		case 431:
+			placedBlockID = 197
+			isDoor = true
+		}
+
+		if isDoor {
+			// Check if we can place the top half
+			topBlockID := s.world.GetBlock(tx, ty+1, tz) >> 4
+			if ty >= 254 || (topBlockID != 0 && topBlockID != 8 && topBlockID != 9 && topBlockID != 10 && topBlockID != 11) {
+				// Cancel placement
+				player.mu.Lock()
+				slotIndex := 36 + player.ActiveSlot
+				slot := player.Inventory[slotIndex]
+				pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+					protocol.WriteByte(w, 0)
+					protocol.WriteInt16(w, int16(slotIndex))
+					protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+				})
+				if player.Conn != nil {
+					protocol.WritePacket(player.Conn, pkt)
+				}
+				player.mu.Unlock()
+				return
+			}
+		}
+
 		// Compute correct metadata for directional blocks
 		player.mu.Lock()
 		yaw := player.Yaw
 		player.mu.Unlock()
-		metadata := blockPlacementMeta(itemID, byte(damage), face, cursorX, cursorY, yaw)
+		metadata := blockPlacementMeta(placedBlockID, byte(damage), face, cursorX, cursorY, yaw)
 
 		// Set block in world
-		blockState := uint16(itemID)<<4 | uint16(metadata)
+		blockState := uint16(placedBlockID)<<4 | uint16(metadata)
 		s.world.SetBlock(tx, ty, tz, blockState)
 
 		// Broadcast block change to all players
 		s.broadcastBlockChange(tx, ty, tz, blockState)
+
+		if isDoor {
+			// upper half has bit 0x08 set
+			topBlockState := uint16(placedBlockID)<<4 | uint16(8)
+			s.world.SetBlock(tx, ty+1, tz, topBlockState)
+			s.broadcastBlockChange(tx, ty+1, tz, topBlockState)
+		}
 
 		// Decrement the item stack if survival
 		if player.GameMode == GameModeSurvival {
@@ -1140,7 +1196,7 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			player.mu.Unlock()
 		}
 
-		log.Printf("Player %s placed block %d at (%d, %d, %d)", player.Username, itemID, tx, ty, tz)
+		log.Printf("Player %s placed block %d (from item %d) at (%d, %d, %d)", player.Username, placedBlockID, itemID, tx, ty, tz)
 
 	case 0x10: // Creative Inventory Action
 		slotNum, _ := protocol.ReadInt16(r)
@@ -2386,6 +2442,19 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 	// expect specific properties on the block state.
 	s.broadcastBlockBreakEffect(player, x, y, z, blockState)
 
+	// In creative mode, don't give items on break
+	var giveItem bool
+	var itemID int16
+	var damage int16
+	var count byte
+
+	if player.GameMode != GameModeCreative {
+		giveItem = true
+		itemID, damage, count = world.BlockToItemID(blockState)
+	} else {
+		log.Printf("Player %s broke block %d at (%d, %d, %d) (creative)", player.Username, blockID, x, y, z)
+	}
+
 	// Handle multi-block structures (doors, double plants)
 	metadata := int16(blockState & 0x0F)
 	isUpperHalf := metadata&0x08 != 0
@@ -2406,6 +2475,13 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 	if isDoor || isDoublePlant {
 		otherState := s.world.GetBlock(x, otherY, z)
 		otherID := otherState >> 4
+
+		// For doors, if the first part didn't give an item (e.g. upper half broken), try the other half.
+		// Since we changed BlockToItemID to always return an item, this might not be needed, but it's a safe fallback.
+		if isDoor && giveItem && itemID < 0 && otherID == blockID {
+			itemID, damage, count = world.BlockToItemID(otherState)
+		}
+
 		if otherID == blockID {
 			// Break the other half too
 			s.world.SetBlock(x, otherY, z, 0)
@@ -2419,14 +2495,12 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 	// Broadcast block change (air) to all players
 	s.broadcastBlockChange(x, y, z, 0)
 
-	// In creative mode, don't give items on break
-	if player.GameMode == GameModeCreative {
-		log.Printf("Player %s broke block %d at (%d, %d, %d) (creative)", player.Username, blockID, x, y, z)
+	// In creative mode, don't give items on break, we already logged it at the top
+	if !giveItem {
 		return
 	}
 
 	// Give item to player by spawning it on the ground
-	itemID, damage, count := world.BlockToItemID(blockState)
 	if itemID < 0 {
 		return
 	}
@@ -3077,6 +3151,21 @@ func blockPlacementMeta(blockID int16, itemDamage byte, face byte, cursorX byte,
 	dir := yawToDirection(yaw)
 
 	switch blockID {
+	// --- Door ---
+	case 64, 71, 193, 194, 195, 196, 197:
+		switch dir {
+		case 0:
+			return 1 // South => 1
+		case 1:
+			return 2 // West => 2
+		case 2:
+			return 3 // North => 3
+		case 3:
+			return 0 // East => 0
+		default:
+			return 0
+		}
+
 	// --- Stairs ---
 	case 53, 67, 108, 109, 114, 128, 134, 135, 136, 156, 163, 164, 180:
 		// Bits 0-1: direction the stair ascends toward, based on player yaw.
