@@ -154,6 +154,7 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		wheat      = 59 << 4  // wheat (id 59)
 		dandelion  = 37 << 4  // dandelion flower
 		poppy      = 38 << 4  // poppy flower
+		goldBlock  = 41 << 4  // gold block (bell)
 	)
 
 	placeBlock := func(wx, y, wz int, state uint16) {
@@ -263,7 +264,7 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 	v.buildFarm(vx+6, vz-22, surfY, placeBlock, log, waterSrc, farmland, wheat)
 
 	// Church (at West)
-	v.buildChurch(vx-18, vz-18, surfY, placeBlock, log, planks, cobble, glass, torch, oakStairs, woodenDoor, slab, air)
+	v.buildChurch(vx-18, vz-18, surfY, placeBlock, log, planks, cobble, glass, torch, oakStairs, woodenDoor, slab, air, goldBlock)
 
 	// ------------------------------------------------------------------
 	// 4. Decorations: Flowers & Lamp Posts
@@ -497,15 +498,15 @@ func (v *VillageGrid) buildHouse(hx, hz, surfY, houseIdx int, place func(wx, y, 
 	}
 }
 
-// buildChurch creates a classic L-shaped village church with a tower.
-func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, torch, stairs, door, slab, air uint16) {
+// buildChurch creates a polished village church with a ground-level entrance and open belfry.
+func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, torch, stairs, door, slab, air, bell uint16) {
 	// Footprint split into two areas:
 	// Tower: [0, 5) x [0, 5)
 	// Hall:  [0, 5) x [4, 11) (Overlaps at dz=4)
 	const towerMaxX, towerMaxZ = 4, 4
 	const hallMaxX, hallMaxZ = 4, 10
 	const hallHeight = 4
-	const towerHeight = 11
+	const towerHeight = 10 // Solid part ends here
 
 	// 1. Tower Construction
 	for dx := 0; dx <= towerMaxX; dx++ {
@@ -514,62 +515,99 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, s
 			isWallZ := dz == 0 || dz == towerMaxZ
 			isCorner := isWallX && isWallZ
 
-			for dy := 0; dy <= towerHeight; dy++ {
-				if dy == 0 {
-					place(hx+dx, surfY+dy, hz+dz, cobble) // Foundation
-				} else if dy == 1 && dx > 0 && dx < towerMaxX && dz > 0 && dz < towerMaxZ {
-					place(hx+dx, surfY+dy, hz+dz, cobble) // Floor
-				} else if isCorner {
-					place(hx+dx, surfY+dy, hz+dz, log) // Corner posts
-				} else if isWallX || (isWallZ && (dy > hallHeight || dz == 0)) {
-					// Walls
-					block := cobble
-					// Door and Cross at front
-					if dz == 0 {
-						if dx == 2 {
-							if dy == 1 {
-								block = door | 3
-							} else if dy == 2 {
-								block = door | 8
-							} else if dy >= 5 && dy <= 7 {
+			for dy := -1; dy <= towerHeight+6; dy++ {
+				if dy == -1 {
+					place(hx+dx, surfY+dy, hz+dz, cobble) // Hidden Foundation
+				} else if dy == 0 {
+					place(hx+dx, surfY+dy, hz+dz, cobble) // Solid Floor at ground level
+				} else if dy == towerHeight {
+					place(hx+dx, surfY+dy, hz+dz, cobble) // Belfry Floor
+				} else {
+					// Corners go up to dy = towerHeight + 4 (Belfry Pillars)
+					isBelfrySpace := dy > towerHeight && dy <= towerHeight+4
+					if isCorner && dy <= towerHeight+4 {
+						place(hx+dx, surfY+dy, hz+dz, log)
+					} else if dy > towerHeight+4 {
+						// Belfry Peaked Roof
+						isRoofWallX := dx == 0 || dx == towerMaxX
+						isRoofWallZ := dz == 0 || dz == towerMaxZ
+						if dy == towerHeight+5 {
+							if isRoofWallX || isRoofWallZ {
+								place(hx+dx, surfY+dy, hz+dz, cobble)
+							}
+						} else if dy == towerHeight+6 {
+							if dx >= 1 && dx <= 3 && dz >= 1 && dz <= 3 && (dx == 2 || dz == 2) {
+								place(hx+dx, surfY+dy, hz+dz, cobble)
+							}
+							if dx == 2 && dz == 2 {
+								place(hx+dx, surfY+dy+1, hz+dz, cobble) // Tip
+							}
+						}
+					} else if !isBelfrySpace {
+						// Solid Walls
+						if isWallX || (isWallZ && (dy > hallHeight || dz == 0)) {
+							block := cobble
+							// Door and Cross at front
+							if dz == 0 {
+								if dx == 2 {
+									if dy == 0 {
+										block = door | 3
+									} else if dy == 1 {
+										block = door | 8
+									} else if dy >= 4 && dy <= 6 {
+										block = glass
+									}
+								} else if (dx == 1 || dx == 3) && dy == 5 {
+									block = glass
+								}
+							}
+							// Upper windows
+							if dy == towerHeight-2 && (isWallX || dz == 0) {
 								block = glass
 							}
-						} else if (dx == 1 || dx == 3) && dy == 6 {
-							block = glass
+							place(hx+dx, surfY+dy, hz+dz, block)
+						} else {
+							if dy > 0 {
+								place(hx+dx, surfY+dy, hz+dz, air) // Hollow interior
+							}
+						}
+					} else {
+						// Open belfry space
+						if dy == towerHeight+4 && isWallZ && (dx == 1 || dx == 3) {
+							place(hx+dx, surfY+dy, hz+dz, cobble) // Arch connectors
+						} else if dy == towerHeight+4 && isWallX && (dz == 1 || dz == 3) {
+							place(hx+dx, surfY+dy, hz+dz, cobble) // Arch connectors
+						} else {
+							place(hx+dx, surfY+dy, hz+dz, air)
 						}
 					}
-					// Upper windows
-					if dy == towerHeight-2 && (isWallX || dz == 0) {
-						block = glass
-					}
-					place(hx+dx, surfY+dy, hz+dz, block)
-				} else {
-					place(hx+dx, surfY+dy, hz+dz, air) // Hollow interior
 				}
 			}
-			// Tower Roof
-			place(hx+dx, surfY+towerHeight+1, hz+dz, cobble)
 		}
 	}
 
-	// 2. Hall Construction
+	// 2. Hanging Bell
+	place(hx+2, surfY+towerHeight+4, hz+2, 85<<4) // Fence hanging from belfry roof center
+	place(hx+2, surfY+towerHeight+3, hz+2, bell)  // The Gold Bell
+
+	// 3. Hall Construction
 	for dx := 0; dx <= hallMaxX; dx++ {
 		for dz := 5; dz <= hallMaxZ; dz++ {
 			isWallX := dx == 0 || dx == hallMaxX
 			isWallZ := dz == hallMaxZ
 			isCorner := isWallX && (dz == hallMaxZ)
 
-			for dy := 0; dy <= hallHeight; dy++ {
-				if dy == 0 {
-					place(hx+dx, surfY+dy, hz+dz, cobble) // Foundation
-				} else if dy == 1 && dx > 0 && dx < hallMaxX && dz < hallMaxZ {
-					place(hx+dx, surfY+dy, hz+dz, cobble) // Floor
+			for dy := -1; dy <= hallHeight; dy++ {
+				if dy == -1 {
+					place(hx+dx, surfY+dy, hz+dz, cobble) // Hidden Foundation
+				} else if dy == 0 {
+					place(hx+dx, surfY+dy, hz+dz, cobble) // Solid Floor
 				} else if isCorner {
 					place(hx+dx, surfY+dy, hz+dz, log) // Back corners
 				} else if isWallX || isWallZ {
 					block := cobble
 					// Windows
-					if dy == 2 || dy == 3 {
+					if dy == 1 || dy == 2 {
 						if isWallX && (dz == 6 || dz == 8) {
 							block = glass
 						} else if isWallZ && dx == 2 {
@@ -578,13 +616,22 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, s
 					}
 					place(hx+dx, surfY+dy, hz+dz, block)
 				} else {
-					place(hx+dx, surfY+dy, hz+dz, air)
+					if dy > 0 {
+						place(hx+dx, surfY+dy, hz+dz, air)
+					}
 				}
 			}
 		}
 	}
 
-	// 3. Hall Gables and Roof
+	// 4. Junction Closure (dz=4)
+	for dx := 1; dx < hallMaxX; dx++ {
+		for dy := 1; dy <= hallHeight; dy++ {
+			place(hx+dx, surfY+dy, hz+4, air)
+		}
+	}
+
+	// 5. Hall Gables and Roof
 	for dz := 4; dz <= hallMaxZ; dz++ {
 		// Back Gable (dz=10)
 		if dz == hallMaxZ {
@@ -610,21 +657,24 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, s
 		place(hx+hallMaxX-1, surfY+hallHeight+2, hz+dz, cobble)
 		place(hx+hallMaxX-1, surfY+hallHeight+3, hz+dz, stairs|1)
 
-		// Ridge
+		// Ridge - Extends into the tower wall
 		place(hx+2, surfY+hallHeight+3, hz+dz, cobble)
 		place(hx+2, surfY+hallHeight+4, hz+dz, slab)
 	}
 
-	// 4. Steeple
-	place(hx+2, surfY+towerHeight+2, hz+2, cobble)
-	place(hx+2, surfY+towerHeight+3, hz+2, 85<<4) // Fence
-	place(hx+2, surfY+towerHeight+4, hz+2, 85<<4) // Fence
+	// 6. Interior Furniture
+	// Fixed pews: 3 = North, 2 = South, 0 = East, 1 = West
+	// We want them facing the altar (dz=hallMaxZ), which is North in our coordinate system?
+	// Actually dz increases. Altar is at dz=9/10. So they should face North (3).
+	// Let's re-verify:
+	// dz = 0 is Front (Entrance)
+	// dz = 11 is Back (Altar)
+	// So facing "Back" is facing North.
+	place(hx+1, surfY+1, hz+6, stairs|3)
+	place(hx+3, surfY+1, hz+6, stairs|3)
+	place(hx+1, surfY+1, hz+8, stairs|3)
+	place(hx+3, surfY+1, hz+8, stairs|3)
 
-	// 5. Interior Furniture
-	for dz := 6; dz <= 8; dz += 2 {
-		place(hx+1, surfY+2, hz+dz, stairs|0)
-		place(hx+3, surfY+2, hz+dz, stairs|1)
-	}
-	place(hx+2, surfY+2, hz+hallMaxZ-1, cobble) // Altar
-	place(hx+2, surfY+3, hz+hallMaxZ-1, torch|5)
+	place(hx+2, surfY+1, hz+hallMaxZ-1, cobble) // Altar
+	place(hx+2, surfY+2, hz+hallMaxZ-1, torch|5)
 }
