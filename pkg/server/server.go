@@ -98,6 +98,7 @@ type Player struct {
 	IsDead       bool
 	Inventory    [45]Slot
 	Cursor       Slot
+	ActiveSlot   int16
 	loadedChunks map[ChunkPos]bool
 	lastChunkX   int32
 	lastChunkZ   int32
@@ -319,6 +320,7 @@ func (s *Server) handleLoginStart(conn net.Conn, pkt *protocol.Packet) (*Player,
 		player.Inventory[i].ItemID = -1
 	}
 	player.Cursor.ItemID = -1
+	player.ActiveSlot = 0
 
 	// Send Login Success
 	loginSuccess := protocol.MarshalPacket(0x02, func(w *bytes.Buffer) {
@@ -532,7 +534,10 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		player.mu.Unlock()
 
 	case 0x09: // Held Item Change
-		// Ignore for now
+		slot, _ := protocol.ReadInt16(r)
+		player.mu.Lock()
+		player.ActiveSlot = slot
+		player.mu.Unlock()
 
 	case 0x07: // Player Digging
 		status, _ := protocol.ReadByte(r)
@@ -627,6 +632,29 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 
 		// Broadcast block change to all players
 		s.broadcastBlockChange(tx, ty, tz, blockState)
+
+		// Decrement the item stack if survival
+		if player.GameMode == GameModeSurvival {
+			player.mu.Lock()
+			slotIndex := 36 + player.ActiveSlot
+			if player.Inventory[slotIndex].ItemID == itemID && player.Inventory[slotIndex].Count > 0 {
+				player.Inventory[slotIndex].Count--
+				if player.Inventory[slotIndex].Count <= 0 {
+					player.Inventory[slotIndex] = Slot{ItemID: -1}
+				}
+				// Sync the slot to the client to ensure consistency
+				slot := player.Inventory[slotIndex]
+				pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+					protocol.WriteByte(w, 0) // Window ID 0 = player inventory
+					protocol.WriteInt16(w, int16(slotIndex))
+					protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+				})
+				if player.Conn != nil {
+					protocol.WritePacket(player.Conn, pkt)
+				}
+			}
+			player.mu.Unlock()
+		}
 
 		log.Printf("Player %s placed block %d at (%d, %d, %d)", player.Username, itemID, tx, ty, tz)
 
