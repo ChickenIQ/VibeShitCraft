@@ -840,11 +840,11 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		x, y, z, _ := protocol.ReadPosition(r)
 		face, _ := protocol.ReadByte(r)
 		// Read held item slot data
-		itemID, _, _, _ := protocol.ReadSlotData(r)
-		// Cursor position (3 bytes) — ignored
-		_, _ = protocol.ReadByte(r)
-		_, _ = protocol.ReadByte(r)
-		_, _ = protocol.ReadByte(r)
+		itemID, _, damage, _ := protocol.ReadSlotData(r)
+		// Cursor position (3 bytes)
+		cursorX, _ := protocol.ReadByte(r)
+		cursorY, _ := protocol.ReadByte(r)
+		_, _ = protocol.ReadByte(r) // cursorZ - unused
 
 		if player.GameMode == GameModeSpectator {
 			player.mu.Lock()
@@ -1004,8 +1004,14 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			return
 		}
 
+		// Compute correct metadata for directional blocks
+		player.mu.Lock()
+		yaw := player.Yaw
+		player.mu.Unlock()
+		metadata := blockPlacementMeta(itemID, byte(damage), face, cursorX, cursorY, yaw)
+
 		// Set block in world
-		blockState := uint16(itemID) << 4
+		blockState := uint16(itemID)<<4 | uint16(metadata)
 		s.world.SetBlock(tx, ty, tz, blockState)
 
 		// Broadcast block change to all players
@@ -2384,6 +2390,206 @@ func faceOffset(x, y, z int32, face byte) (int32, int32, int32) {
 		return x + 1, y, z
 	default:
 		return x, y + 1, z
+	}
+}
+
+// yawToDirection converts a player yaw angle to a cardinal direction index.
+// Returns: 0=south, 1=west, 2=north, 3=east (matches vanilla Minecraft).
+func yawToDirection(yaw float32) int {
+	return int(math.Floor(float64(yaw)*4.0/360.0+0.5)) & 3
+}
+
+// blockPlacementMeta computes the block metadata for a placed block based on its
+// type, the item damage value, the face clicked, cursor position, and player yaw.
+// For directional blocks (stairs, torches, levers, etc.) the metadata encodes
+// orientation derived from placement context. For other blocks the item damage
+// value is used directly as metadata (e.g. wool colour, wood type).
+func blockPlacementMeta(blockID int16, itemDamage byte, face byte, cursorX byte, cursorY byte, yaw float32) byte {
+	dir := yawToDirection(yaw)
+
+	switch blockID {
+	// --- Stairs ---
+	case 53, 67, 108, 109, 114, 128, 134, 135, 136, 156, 163, 164, 180:
+		// Bits 0-1: direction the stair ascends toward, based on player yaw.
+		// Bit 2: set when upside-down (placed on bottom face or upper-half of a side face).
+		var meta byte
+		switch dir {
+		case 0:
+			meta = 2 // south
+		case 1:
+			meta = 1 // west
+		case 2:
+			meta = 3 // north
+		case 3:
+			meta = 0 // east
+		}
+		if face == 0 || (face != 1 && cursorY >= 8) {
+			meta |= 4
+		}
+		return meta
+
+	// --- Torch / Redstone Torch ---
+	case 50, 75, 76:
+		switch face {
+		case 1:
+			return 5 // floor
+		case 2:
+			return 4 // attached to block south, pointing north
+		case 3:
+			return 3 // attached to block north, pointing south
+		case 4:
+			return 2 // attached to block east, pointing west
+		case 5:
+			return 1 // attached to block west, pointing east
+		default:
+			return 5
+		}
+
+	// --- Lever ---
+	case 69:
+		switch face {
+		case 0: // ceiling
+			if dir == 0 || dir == 2 {
+				return 7 // N-S axis
+			}
+			return 0 // E-W axis
+		case 1: // floor
+			if dir == 0 || dir == 2 {
+				return 5 // N-S axis
+			}
+			return 6 // E-W axis
+		case 2:
+			return 4
+		case 3:
+			return 3
+		case 4:
+			return 2
+		case 5:
+			return 1
+		default:
+			return 5
+		}
+
+	// --- Ladder / Wall Sign ---
+	case 65, 68:
+		switch face {
+		case 2:
+			return 2
+		case 3:
+			return 3
+		case 4:
+			return 4
+		case 5:
+			return 5
+		default:
+			return 2
+		}
+
+	// --- Button (stone / wood) ---
+	case 77, 143:
+		switch face {
+		case 0:
+			return 0 // ceiling
+		case 1:
+			return 5 // floor
+		case 2:
+			return 4
+		case 3:
+			return 3
+		case 4:
+			return 2
+		case 5:
+			return 1
+		default:
+			return 5
+		}
+
+	// --- Furnace / Dispenser / Dropper ---
+	case 61, 23, 158:
+		// Front faces toward the player (opposite of look direction).
+		switch dir {
+		case 0:
+			return 2 // north
+		case 1:
+			return 5 // east
+		case 2:
+			return 3 // south
+		case 3:
+			return 4 // west
+		default:
+			return 2
+		}
+
+	// --- Chest / Trapped Chest / Ender Chest ---
+	case 54, 146, 130:
+		switch dir {
+		case 0:
+			return 2
+		case 1:
+			return 5
+		case 2:
+			return 3
+		case 3:
+			return 4
+		default:
+			return 2
+		}
+
+	// --- Pumpkin / Jack-o-Lantern ---
+	case 86, 91:
+		// Carved face faces toward the player.
+		return byte((dir + 2) & 3)
+
+	// --- Log / Log2 ---
+	case 17, 162:
+		woodType := itemDamage & 0x03
+		switch face {
+		case 2, 3:
+			return woodType | 8 // Z axis
+		case 4, 5:
+			return woodType | 4 // X axis
+		default:
+			return woodType // Y axis (face 0, 1, or default)
+		}
+
+	// --- Slab / Wooden Slab ---
+	case 44, 126:
+		slabType := itemDamage & 0x07
+		if face == 0 || (face != 1 && cursorY >= 8) {
+			slabType |= 8 // upper slab
+		}
+		return slabType
+
+	// --- Standing Sign ---
+	case 63:
+		return byte(int(math.Floor(float64(yaw+180.0)*16.0/360.0+0.5)) & 15)
+
+	// --- Hopper ---
+	case 154:
+		switch face {
+		case 2:
+			return 2
+		case 3:
+			return 3
+		case 4:
+			return 4
+		case 5:
+			return 5
+		default:
+			return 0 // output down
+		}
+
+	// --- Anvil ---
+	case 145:
+		return byte(dir & 3)
+
+	// --- Redstone Repeater / Comparator ---
+	case 93, 149:
+		return byte(dir)
+
+	default:
+		// Non-directional blocks: use item damage as metadata (colour, variant, etc.)
+		return itemDamage & 0x0F
 	}
 }
 
