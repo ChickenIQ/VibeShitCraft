@@ -610,6 +610,18 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		_, _ = protocol.ReadByte(r)
 
 		if player.GameMode == GameModeSpectator {
+			player.mu.Lock()
+			slotIndex := 36 + player.ActiveSlot
+			slot := player.Inventory[slotIndex]
+			pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+				protocol.WriteByte(w, 0)
+				protocol.WriteInt16(w, int16(slotIndex))
+				protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+			})
+			if player.Conn != nil {
+				protocol.WritePacket(player.Conn, pkt)
+			}
+			player.mu.Unlock()
 			return // spectators can't place blocks
 		}
 
@@ -618,6 +630,7 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			player.mu.Lock()
 			slotIndex := 36 + player.ActiveSlot
 			slot := player.Inventory[slotIndex]
+			log.Printf("Aborting USE ITEM for %d. Server thinks active slot %d (index %d) has item %d:%d qty %d", itemID, player.ActiveSlot, slotIndex, slot.ItemID, slot.Damage, slot.Count)
 			pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
 				protocol.WriteByte(w, 0) // Window ID 0 = player inventory
 				protocol.WriteInt16(w, int16(slotIndex))
@@ -637,6 +650,7 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			player.mu.Lock()
 			slotIndex := 36 + player.ActiveSlot
 			slot := player.Inventory[slotIndex]
+			log.Printf("Aborting place for item %d. Server thinks active slot %d (index %d) has item %d:%d qty %d", itemID, player.ActiveSlot, slotIndex, slot.ItemID, slot.Damage, slot.Count)
 			pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
 				protocol.WriteByte(w, 0) // Window ID 0 = player inventory
 				protocol.WriteInt16(w, int16(slotIndex))
@@ -651,6 +665,42 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 
 		// Calculate target position from face
 		tx, ty, tz := faceOffset(x, y, z, face)
+
+		// Don't place in invalid y limits
+		if ty < 0 || ty > 255 {
+			player.mu.Lock()
+			slotIndex := 36 + player.ActiveSlot
+			slot := player.Inventory[slotIndex]
+			pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+				protocol.WriteByte(w, 0)
+				protocol.WriteInt16(w, int16(slotIndex))
+				protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+			})
+			if player.Conn != nil {
+				protocol.WritePacket(player.Conn, pkt)
+			}
+			player.mu.Unlock()
+			return
+		}
+
+		// Don't place a block inside another non-replaceable block
+		existingBlock := s.world.GetBlock(tx, ty, tz)
+		existingID := existingBlock >> 4
+		if existingID != 0 && existingID != 8 && existingID != 9 && existingID != 10 && existingID != 11 { // not air or liquid
+			player.mu.Lock()
+			slotIndex := 36 + player.ActiveSlot
+			slot := player.Inventory[slotIndex]
+			pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+				protocol.WriteByte(w, 0)
+				protocol.WriteInt16(w, int16(slotIndex))
+				protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+			})
+			if player.Conn != nil {
+				protocol.WritePacket(player.Conn, pkt)
+			}
+			player.mu.Unlock()
+			return
+		}
 
 		// Set block in world
 		blockState := uint16(itemID) << 4
