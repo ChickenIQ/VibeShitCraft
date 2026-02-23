@@ -65,12 +65,6 @@ type Server struct {
 	nextEID  int32
 	stopCh   chan struct{}
 	world    *world.World
-	chests   map[world.BlockPos]*ChestData
-}
-
-// ChestData holds the 27-slot inventory of a placed chest.
-type ChestData struct {
-	Slots [27]Slot
 }
 
 // ItemEntity represents an item dropped on the ground.
@@ -81,31 +75,6 @@ type ItemEntity struct {
 	Count      byte
 	X, Y, Z    float64
 	VX, VY, VZ float64 // Velocity tracking for drops
-}
-
-// MobEntity represents a spawned mob in the world.
-type MobEntity struct {
-	EntityID   int32
-	TypeID     byte // Minecraft entity type ID (e.g. 50=Creeper, 90=Pig)
-	X, Y, Z    float64
-	Yaw        float32
-	Pitch      float32
-	VX, VY, VZ float64 // Velocity tracking for gravity
-}
-
-// SpawnEggItemID is the item ID for spawn eggs in MC 1.8.
-const SpawnEggItemID = 383
-
-// IsValidSpawnEggType returns true if the damage value of a spawn egg
-// corresponds to a valid mob type that can be spawned.
-func IsValidSpawnEggType(typeID byte) bool {
-	switch typeID {
-	case 50, 51, 52, 54, 55, 56, 57, 58, 59, 60, 61, 62, // hostile
-		65, 66, 67, 68, // misc hostile
-		90, 91, 92, 93, 94, 95, 96, 98, 100, 101, 120: // passive
-		return true
-	}
-	return false
 }
 
 // Slot represents an inventory slot.
@@ -137,8 +106,6 @@ type Player struct {
 	lastChunkZ   int32
 	DragSlots    []int16        // Slots being dragged over in mode 5
 	DragButton   int            // 0=left drag, 1=right drag
-	OpenWindowID byte           // 0 = no window open, 1 = chest
-	OpenChestPos world.BlockPos // Position of the open chest
 	mu           sync.Mutex
 }
 
@@ -156,7 +123,6 @@ func New(config Config) *Server {
 		nextEID:  1,
 		stopCh:   make(chan struct{}),
 		world:    world.NewWorld(seed),
-		chests:   make(map[world.BlockPos]*ChestData),
 	}
 }
 
@@ -213,15 +179,7 @@ func (s *Server) tickEntityPhysics() {
 		entityID int32
 		x, y, z  float64
 	}
-	type movedMob struct {
-		entityID  int32
-		x, y, z   float64
-		yaw       float32
-		pitch     float32
-		onGround  bool
-	}
 	var movedItems []movedItem
-	var movedMobs []movedMob
 
 	for _, item := range s.entities {
 		if item.VX == 0 && item.VY == 0 && item.VZ == 0 {
@@ -271,56 +229,11 @@ func (s *Server) tickEntityPhysics() {
 		movedItems = append(movedItems, movedItem{item.EntityID, item.X, item.Y, item.Z})
 	}
 
-	for _, mob := range s.mobs {
-		if mob.VX == 0 && mob.VY == 0 && mob.VZ == 0 {
-			blockBelow := s.world.GetBlock(int32(math.Floor(mob.X)), int32(math.Floor(mob.Y-0.1)), int32(math.Floor(mob.Z)))
-			if blockBelow>>4 != 0 {
-				continue
-			}
-		}
-
-		mob.VY -= gravity
-
-		mob.VX *= drag
-		mob.VY *= drag
-		mob.VZ *= drag
-
-		newX := mob.X + mob.VX
-		newY := mob.Y + mob.VY
-		newZ := mob.Z + mob.VZ
-
-		onGround := false
-		blockAtNew := s.world.GetBlock(int32(math.Floor(newX)), int32(math.Floor(newY)), int32(math.Floor(newZ)))
-		if blockAtNew>>4 != 0 {
-			newY = math.Floor(newY) + 1.0
-			mob.VY = 0
-			mob.VX *= groundDrag
-			mob.VZ *= groundDrag
-			onGround = true
-
-			if math.Abs(mob.VX) < 0.001 {
-				mob.VX = 0
-			}
-			if math.Abs(mob.VZ) < 0.001 {
-				mob.VZ = 0
-			}
-		}
-
-		mob.X = newX
-		mob.Y = newY
-		mob.Z = newZ
-
-		movedMobs = append(movedMobs, movedMob{mob.EntityID, mob.X, mob.Y, mob.Z, mob.Yaw, mob.Pitch, onGround})
-	}
-
 	s.mu.Unlock()
 
 	// Broadcast entity teleport packets
 	for _, m := range movedItems {
 		s.broadcastEntityTeleportByID(m.entityID, m.x, m.y, m.z, 0, 0, true)
-	}
-	for _, m := range movedMobs {
-		s.broadcastEntityTeleportByID(m.entityID, m.x, m.y, m.z, m.yaw, m.pitch, m.onGround)
 	}
 }
 
@@ -884,13 +797,6 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			return
 		}
 
-		// Check if right-clicking on a chest to open it
-		clickedBlock := s.world.GetBlock(x, y, z)
-		if clickedBlock>>4 == 54 {
-			s.openChest(player, x, y, z)
-			return
-		}
-
 		// Don't place air
 		if itemID <= 0 || itemID > 255 {
 			// Abort placement, but we MUST resync the slot so the client doesn't
@@ -952,34 +858,6 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 
 		// Set block in world
 		blockState := uint16(itemID) << 4
-		// For chests, compute facing from player yaw
-		if itemID == 54 {
-			yaw := float64(player.Yaw)
-			yaw = math.Mod(yaw, 360)
-			if yaw < 0 {
-				yaw += 360
-			}
-			var facing uint16
-			switch {
-			case yaw >= 315 || yaw < 45:
-				facing = 3 // south (+Z) — player faces south, chest faces toward player
-			case yaw >= 45 && yaw < 135:
-				facing = 4 // west (-X)
-			case yaw >= 135 && yaw < 225:
-				facing = 2 // north (-Z)
-			case yaw >= 225 && yaw < 315:
-				facing = 5 // east (+X)
-			}
-			blockState = (54 << 4) | facing
-			// Create chest storage
-			pos := world.BlockPos{X: tx, Y: ty, Z: tz}
-			s.mu.Lock()
-			s.chests[pos] = &ChestData{}
-			for i := range s.chests[pos].Slots {
-				s.chests[pos].Slots[i].ItemID = -1
-			}
-			s.mu.Unlock()
-		}
 		s.world.SetBlock(tx, ty, tz, blockState)
 
 		// Broadcast block change to all players
