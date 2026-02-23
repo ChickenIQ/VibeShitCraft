@@ -442,7 +442,7 @@ func SerializeSections(sections *[SectionsPerChunk][ChunkSectionSize]uint16, bio
 		}
 	}
 
-	// Write block data for each active section
+	// Write all block data for each active section first
 	for s := 0; s < SectionsPerChunk; s++ {
 		if primaryBitMask&(1<<uint(s)) == 0 {
 			continue
@@ -450,15 +450,25 @@ func SerializeSections(sections *[SectionsPerChunk][ChunkSectionSize]uint16, bio
 		for _, b := range sections[s] {
 			binary.Write(&buf, binary.LittleEndian, b)
 		}
+	}
 
-		// Block light (2048 bytes) — full bright
+	// Then write block light for each active section
+	for s := 0; s < SectionsPerChunk; s++ {
+		if primaryBitMask&(1<<uint(s)) == 0 {
+			continue
+		}
 		light := make([]byte, 2048)
 		for i := range light {
 			light[i] = 0xFF
 		}
 		buf.Write(light)
+	}
 
-		// Sky light (2048 bytes) — full bright
+	// Then write sky light for each active section
+	for s := 0; s < SectionsPerChunk; s++ {
+		if primaryBitMask&(1<<uint(s)) == 0 {
+			continue
+		}
 		sky := make([]byte, 2048)
 		for i := range sky {
 			sky[i] = 0xFF
