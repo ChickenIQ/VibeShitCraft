@@ -7,31 +7,31 @@ import (
 
 // Generator produces terrain data from a seed using Perlin noise.
 type Generator struct {
-	Seed       int64
-	terrain    *Perlin      // broad height map noise
-	roughness  *Perlin      // fine detail / roughness noise
-	tempNoise  *Perlin      // biome temperature
-	rainNoise  *Perlin      // biome rainfall
-	caveNoise  *Perlin      // 3D cave carving
-	cave2      *Perlin      // secondary 3D cave noise for spaghetti caves
-	treeNoise  *Perlin      // tree placement
-	boulderNoise *Perlin     // boulder placement
-	villageGen *VillageGrid // village placement grid
+	Seed         int64
+	terrain      *Perlin      // broad height map noise
+	roughness    *Perlin      // fine detail / roughness noise
+	tempNoise    *Perlin      // biome temperature
+	rainNoise    *Perlin      // biome rainfall
+	caveNoise    *Perlin      // 3D cave carving
+	cave2        *Perlin      // secondary 3D cave noise for spaghetti caves
+	treeNoise    *Perlin      // tree placement
+	boulderNoise *Perlin      // boulder placement
+	villageGen   *VillageGrid // village placement grid
 }
 
 // NewGenerator creates a terrain generator from a seed.
 func NewGenerator(seed int64) *Generator {
 	return &Generator{
-		Seed:       seed,
-		terrain:    NewPerlin(seed),
-		roughness:  NewPerlin(seed + 100),
-		tempNoise:  NewPerlin(seed + 1),
-		rainNoise:  NewPerlin(seed + 2),
-		caveNoise:  NewPerlin(seed + 3),
-		cave2:      NewPerlin(seed + 5),
-		treeNoise:  NewPerlin(seed + 4),
+		Seed:         seed,
+		terrain:      NewPerlin(seed),
+		roughness:    NewPerlin(seed + 100),
+		tempNoise:    NewPerlin(seed + 1),
+		rainNoise:    NewPerlin(seed + 2),
+		caveNoise:    NewPerlin(seed + 3),
+		cave2:        NewPerlin(seed + 5),
+		treeNoise:    NewPerlin(seed + 4),
 		boulderNoise: NewPerlin(seed + 200),
-		villageGen: NewVillageGrid(seed),
+		villageGen:   NewVillageGrid(seed),
 	}
 }
 
@@ -245,7 +245,7 @@ func (g *Generator) buildJungleTree(lx, y, lz int, sections *[SectionsPerChunk][
 		sec, sy := ly/16, ly%16
 		for dx := -radius; dx <= radius; dx++ {
 			for dz := -radius; dz <= radius; dz++ {
-				if (dx*dx+dz*dz) > radius*radius+1 {
+				if (dx*dx + dz*dz) > radius*radius+1 {
 					continue
 				}
 				nlx, nlz := lx+dx, lz+dz
@@ -289,7 +289,7 @@ func (g *Generator) buildDarkOakTree(lx, y, lz int, sections *[SectionsPerChunk]
 		}
 		for dx := -radius + 1; dx <= radius; dx++ {
 			for dz := -radius + 1; dz <= radius; dz++ {
-				if (dx*dx+dz*dz) > radius*radius+2 {
+				if (dx*dx + dz*dz) > radius*radius+2 {
 					continue
 				}
 				nlx, nlz := lx+dx, lz+dz
@@ -323,35 +323,49 @@ func (g *Generator) generateBoulders(chunkX, chunkZ int, sections *[SectionsPerC
 				continue
 			}
 
-			radius := 1 + (wx*wz)%2
-			for dx := -radius; dx <= radius; dx++ {
-				for dz := -radius; dz <= radius; dz++ {
-					if (dx*dx+dz*dz) > radius*radius+1 {
-						continue
-					}
-					nlx, nlz := lx+dx, lz+dz
-					if nlx < 0 || nlx >= 16 || nlz < 0 || nlz >= 16 {
-						continue
-					}
-					
-					// Material variety
-					h := (wx+dx*31+wz*dz*17)
-					block := uint16(4 << 4) // cobblestone
-					if h%3 == 0 {
-						block = 1 << 4 // stone
-					} else if h%5 == 0 {
-						block = 48 << 4 // mossy
-					} else if h%7 == 0 {
-						block = 44 << 4 // stone slab
-					}
-					
-					targetSec, targetSy := y/16, y%16
-					targetID := sections[targetSec][(targetSy*16+nlz)*16+nlx] >> 4
-					if targetID == 0 || targetID == 2 || targetID == 31 || targetID == 3 {
-						sections[targetSec][(targetSy*16+nlz)*16+nlx] = block
-						// Height variation
-						if (dx == 0 && dz == 0) || (radius > 1 && h%4 == 0) {
-							sections[(y+1)/16][((y+1)%16*16+nlz)*16+nlx] = block
+			// Create larger organic boulder
+			baseRadius := 2.0 + float64((wx*wz)%3) // Radius 2 to 4
+			for dx := -int(baseRadius) - 1; dx <= int(baseRadius)+1; dx++ {
+				for dy := -1; dy <= int(baseRadius); dy++ {
+					for dz := -int(baseRadius) - 1; dz <= int(baseRadius)+1; dz++ {
+						// Squish the sphere down slightly for a flatter look
+						distSq := float64(dx*dx)/(baseRadius*baseRadius) +
+							float64(dy*dy)/((baseRadius-0.5)*(baseRadius-0.5)) +
+							float64(dz*dz)/(baseRadius*baseRadius)
+
+						// Add some noise to the edges for a natural shape
+						noiseOff := float64((wx+dx*7+wz+dz*11+dy*13)%100) / 100.0 * 0.4
+						if distSq+noiseOff > 1.0 {
+							continue
+						}
+
+						nlx, nlz := lx+dx, lz+dz
+						if nlx < 0 || nlx >= 16 || nlz < 0 || nlz >= 16 {
+							continue
+						}
+
+						targetY := y + dy
+						if targetY < 0 || targetY > 255 {
+							continue
+						}
+
+						// Material variety matching the requested palette
+						h := (wx + dx*31 + wz*dz*17 + dy*23)
+						block := uint16(4 << 4) // default cobblestone
+						r := h % 100
+						if r < 30 {
+							block = 1 << 4 // 30% stone
+						} else if r < 60 {
+							block = 1<<4 | 5 // 30% andesite (stone meta 5)
+						} else if r < 80 {
+							block = 48 << 4 // 20% mossy cobblestone
+						} // Remaining 20% is cobblestone
+
+						// Place the block if the location is air, grass, foliage, or dirt
+						targetSec, targetSy := targetY/16, targetY%16
+						targetID := sections[targetSec][(targetSy*16+nlz)*16+nlx] >> 4
+						if targetID == 0 || targetID == 2 || targetID == 31 || targetID == 3 {
+							sections[targetSec][(targetSy*16+nlz)*16+nlx] = block
 						}
 					}
 				}
