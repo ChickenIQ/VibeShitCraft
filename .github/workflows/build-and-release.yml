@@ -20,6 +20,8 @@ jobs:
           - { goos: aix,       goarch: ppc64,    goppc64: power8,     suffix: -power8    }
           - { goos: aix,       goarch: ppc64,    goppc64: power9,     suffix: -power9    }
           - { goos: aix,       goarch: ppc64,    goppc64: power10,    suffix: -power10   }
+          # android
+          - { goos: android,   goarch: arm64 }
           # darwin
           - { goos: darwin,    goarch: amd64,    goamd64: v1,         suffix: -v1        }
           - { goos: darwin,    goarch: amd64,    goamd64: v2,         suffix: -v2        }
