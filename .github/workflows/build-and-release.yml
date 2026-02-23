@@ -2,7 +2,8 @@ name: Build and Release
 
 on:
   push:
-    branches: ["**"]
+    branches:
+      - '**'
 
 permissions:
   contents: write
@@ -34,3 +35,4 @@ jobs:
           name: Build ${{ github.run_number }} from ${{ github.ref_name }}
           body: "Built from commit [${{ github.sha }}](https://github.com/${{ github.repository }}/commit/${{ github.sha }})"
           files: vibeshitcraft
+          make_latest: true
