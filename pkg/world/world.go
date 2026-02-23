@@ -113,7 +113,6 @@ func (w *World) SetBlock(x, y, z int32, state uint16) {
 	}
 }
 
-
 // GetChunkData returns the serialized chunk data for the given chunk coordinates.
 // It uses cached chunks if available, otherwise it realizes them.
 func (w *World) GetChunkData(cx, cz int32) ([]byte, uint16) {
@@ -188,41 +187,41 @@ func FlatWorldBlock(y int32) uint16 {
 // breaks with just a status=0 (start digging) packet in survival mode.
 func IsInstantBreak(blockID uint16) bool {
 	switch blockID {
-	case 6,  // sapling
-		27, 28,          // powered/detector rails
-		30,              // cobweb (actually not instant but low)
-		31, 32,          // tall grass, dead bush
-		37, 38, 39, 40,  // flowers, mushrooms
-		50,              // torch
-		51,              // fire
-		55,              // redstone wire
-		59,              // wheat
-		63, 68,          // sign post, wall sign
-		65,              // ladder
-		66,              // rail
-		69,              // lever
-		70, 72,          // stone/wooden pressure plate
-		75, 76,          // redstone torches
-		77,              // button
-		78,              // snow layer
-		83,              // sugar cane
-		90,              // nether portal
-		93, 94,          // repeater
-		106,             // vine
-		111,             // lily pad
-		115,             // nether wart
-		119, 120,        // end portal, end portal frame
-		131, 132,        // tripwire hook, tripwire
-		141, 142,        // carrot, potato
-		143,             // wooden button
-		144,             // head
-		147, 148,        // golden/stone pressure plate
-		149, 150,        // comparator
-		151,             // daylight sensor
-		154,             // hopper
-		157,             // activator rail
-		175,             // double plant (tall grass, etc.)
-		176, 177:        // banner (standing/wall)
+	case 6, // sapling
+		27, 28, // powered/detector rails
+		30,     // cobweb (actually not instant but low)
+		31, 32, // tall grass, dead bush
+		37, 38, 39, 40, // flowers, mushrooms
+		50,     // torch
+		51,     // fire
+		55,     // redstone wire
+		59,     // wheat
+		63, 68, // sign post, wall sign
+		65,     // ladder
+		66,     // rail
+		69,     // lever
+		70, 72, // stone/wooden pressure plate
+		75, 76, // redstone torches
+		77,     // button
+		78,     // snow layer
+		83,     // sugar cane
+		90,     // nether portal
+		93, 94, // repeater
+		106,      // vine
+		111,      // lily pad
+		115,      // nether wart
+		119, 120, // end portal, end portal frame
+		131, 132, // tripwire hook, tripwire
+		141, 142, // carrot, potato
+		143,      // wooden button
+		144,      // head
+		147, 148, // golden/stone pressure plate
+		149, 150, // comparator
+		151,      // daylight sensor
+		154,      // hopper
+		157,      // activator rail
+		175,      // double plant (tall grass, etc.)
+		176, 177: // banner (standing/wall)
 		return true
 	}
 	return false
@@ -335,6 +334,8 @@ func BlockToItemID(blockState uint16) (int16, int16, byte) {
 		return 12, metadata, 1
 	case 13: // gravel
 		return 13, 0, 1
+	case 54: // chest
+		return 54, 0, 1
 	default:
 		return int16(blockID), metadata, 1
 	}
