@@ -20,17 +20,6 @@ jobs:
           - { goos: aix,       goarch: ppc64,    goppc64: power8,     suffix: -power8    }
           - { goos: aix,       goarch: ppc64,    goppc64: power9,     suffix: -power9    }
           - { goos: aix,       goarch: ppc64,    goppc64: power10,    suffix: -power10   }
-          # android
-          - { goos: android,   goarch: "386",    go386: sse2,         suffix: -sse2      }
-          - { goos: android,   goarch: "386",    go386: softfloat,    suffix: -softfloat }
-          - { goos: android,   goarch: amd64,    goamd64: v1,         suffix: -v1        }
-          - { goos: android,   goarch: amd64,    goamd64: v2,         suffix: -v2        }
-          - { goos: android,   goarch: amd64,    goamd64: v3,         suffix: -v3        }
-          - { goos: android,   goarch: amd64,    goamd64: v4,         suffix: -v4        }
-          - { goos: android,   goarch: arm,      goarm: "5",          suffix: -v5        }
-          - { goos: android,   goarch: arm,      goarm: "6",          suffix: -v6        }
-          - { goos: android,   goarch: arm,      goarm: "7",          suffix: -v7        }
-          - { goos: android,   goarch: arm64 }
           # darwin
           - { goos: darwin,    goarch: amd64,    goamd64: v1,         suffix: -v1        }
           - { goos: darwin,    goarch: amd64,    goamd64: v2,         suffix: -v2        }
@@ -60,12 +49,6 @@ jobs:
           - { goos: illumos,   goarch: amd64,    goamd64: v2,         suffix: -v2        }
           - { goos: illumos,   goarch: amd64,    goamd64: v3,         suffix: -v3        }
           - { goos: illumos,   goarch: amd64,    goamd64: v4,         suffix: -v4        }
-          # ios
-          - { goos: ios,       goarch: amd64,    goamd64: v1,         suffix: -v1        }
-          - { goos: ios,       goarch: amd64,    goamd64: v2,         suffix: -v2        }
-          - { goos: ios,       goarch: amd64,    goamd64: v3,         suffix: -v3        }
-          - { goos: ios,       goarch: amd64,    goamd64: v4,         suffix: -v4        }
-          - { goos: ios,       goarch: arm64 }
           # js
           - { goos: js,        goarch: wasm }
           # linux
