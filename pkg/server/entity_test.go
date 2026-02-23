@@ -250,6 +250,107 @@ func TestMobEntitiesForNewPlayer(t *testing.T) {
 	}
 }
 
+func TestItemPickupDelay(t *testing.T) {
+	s := New(DefaultConfig())
+
+	// Create item entity with SpawnTime = now (should NOT be pickable)
+	s.mu.Lock()
+	eid := s.nextEID
+	s.nextEID++
+	recentItem := &ItemEntity{
+		EntityID:  eid,
+		ItemID:    4, // Cobblestone
+		Damage:    0,
+		Count:     1,
+		X:         8.5,
+		Y:         65.0,
+		Z:         8.5,
+		SpawnTime: time.Now(),
+	}
+	s.entities[eid] = recentItem
+
+	// Create item entity with SpawnTime in the past (should be pickable)
+	eid2 := s.nextEID
+	s.nextEID++
+	oldItem := &ItemEntity{
+		EntityID:  eid2,
+		ItemID:    1, // Stone
+		Damage:    0,
+		Count:     1,
+		X:         8.5,
+		Y:         65.0,
+		Z:         8.5,
+		SpawnTime: time.Now().Add(-3 * time.Second),
+	}
+	s.entities[eid2] = oldItem
+	s.mu.Unlock()
+
+	c1, c2 := net.Pipe()
+	defer c1.Close()
+	defer c2.Close()
+
+	player := &Player{
+		EntityID: 1,
+		Username: "Tester",
+		Conn:     c1,
+		X:        8.5,
+		Y:        65.0,
+		Z:        8.5,
+	}
+	for i := range player.Inventory {
+		player.Inventory[i].ItemID = -1
+	}
+	s.players[player.EntityID] = player
+
+	// Drain packets in background
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			if _, err := c2.Read(buf); err != nil {
+				return
+			}
+		}
+	}()
+
+	stop := make(chan struct{})
+	go s.itemPickupLoop(player, stop)
+
+	// Wait for one pickup tick cycle (500ms + buffer)
+	time.Sleep(800 * time.Millisecond)
+	close(stop)
+
+	// The old item (spawned 3s ago) should have been picked up
+	// The recent item (spawned just now) should still exist
+	s.mu.RLock()
+	_, recentExists := s.entities[recentItem.EntityID]
+	_, oldExists := s.entities[oldItem.EntityID]
+	s.mu.RUnlock()
+
+	if !recentExists {
+		t.Error("recently spawned item should NOT be picked up due to pickup delay")
+	}
+	if oldExists {
+		t.Error("old item (spawned 3s ago) should have been picked up")
+	}
+}
+
+func TestItemEntityHasSpawnTime(t *testing.T) {
+	srv := New(DefaultConfig())
+
+	before := time.Now()
+	srv.SpawnItem(5.5, 10.0, 15.5, 0.1, 0.2, -0.1, 4, 0, 1)
+	after := time.Now()
+
+	srv.mu.RLock()
+	defer srv.mu.RUnlock()
+
+	for _, item := range srv.entities {
+		if item.SpawnTime.Before(before) || item.SpawnTime.After(after) {
+			t.Errorf("item SpawnTime %v should be between %v and %v", item.SpawnTime, before, after)
+		}
+	}
+}
+
 func TestMobEntityAIHook(t *testing.T) {
 	s := New(DefaultConfig())
 

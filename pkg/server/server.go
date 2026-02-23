@@ -76,6 +76,7 @@ type ItemEntity struct {
 	Count      byte
 	X, Y, Z    float64
 	VX, VY, VZ float64 // Velocity tracking for drops
+	SpawnTime  time.Time
 }
 
 // MobEntity represents a living entity (mob) in the world.
@@ -2674,16 +2675,17 @@ func (s *Server) SpawnItem(x, y, z float64, vx, vy, vz float64, itemID int16, da
 	s.nextEID++
 
 	item := &ItemEntity{
-		EntityID: eid,
-		ItemID:   itemID,
-		Damage:   damage,
-		Count:    count,
-		X:        x,
-		Y:        y,
-		Z:        z,
-		VX:       vx,
-		VY:       vy,
-		VZ:       vz,
+		EntityID:  eid,
+		ItemID:    itemID,
+		Damage:    damage,
+		Count:     count,
+		X:         x,
+		Y:         y,
+		Z:         z,
+		VX:        vx,
+		VY:        vy,
+		VZ:        vz,
+		SpawnTime: time.Now(),
 	}
 	s.entities[eid] = item
 	s.mu.Unlock()
@@ -2783,6 +2785,11 @@ func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
 			}
 
 			for _, e := range entities {
+				// Skip recently spawned items (2 second pickup delay)
+				if time.Since(e.SpawnTime) < 2*time.Second {
+					continue
+				}
+
 				dx := e.X - px
 				dy := e.Y - py
 				dz := e.Z - pz
