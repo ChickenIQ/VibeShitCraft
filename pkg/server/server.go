@@ -1953,10 +1953,6 @@ func (s *Server) handleWindowClick(player *Player, windowID byte, slotNum int16,
 		protocol.WritePacket(player.Conn, cursorPkt)
 	}
 
-	_ = px
-	_ = py
-	_ = pz
-
 	player.mu.Unlock()
 	s.broadcastHeldItem(player)
 }
