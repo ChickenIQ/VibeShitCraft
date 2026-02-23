@@ -622,6 +622,21 @@ func (s *Server) handlePlay(player *Player) {
 	s.spawnPlayerForOthers(player)
 	s.spawnOthersForPlayer(player)
 
+	// Add self to own tab list so the player can see themselves
+	selfListAdd := protocol.MarshalPacket(0x38, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, 0) // Action: Add Player
+		protocol.WriteVarInt(w, 1) // Number of players
+		protocol.WriteUUID(w, player.UUID)
+		protocol.WriteString(w, player.Username)
+		protocol.WriteVarInt(w, 0)                       // Number of properties
+		protocol.WriteVarInt(w, int32(player.GameMode))  // Gamemode
+		protocol.WriteVarInt(w, 0)                       // Ping
+		protocol.WriteBool(w, false)                     // Has display name
+	})
+	player.mu.Lock()
+	protocol.WritePacket(player.Conn, selfListAdd)
+	player.mu.Unlock()
+
 	// Spawn existing item entities for this player
 	s.spawnEntitiesForPlayer(player)
 
