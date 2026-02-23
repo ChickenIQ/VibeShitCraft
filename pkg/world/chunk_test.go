@@ -1,6 +1,7 @@
 package world
 
 import (
+	"encoding/binary"
 	"testing"
 )
 
@@ -63,7 +64,7 @@ func TestSerializeSectionsNonInterleaved(t *testing.T) {
 	// (NOT after section 0's light data, which would be the interleaved bug)
 	sec1BlockStart := blockDataPerSection // offset 8192
 	// First uint16 of section 1 should be stone (1<<4 = 0x0010)
-	sec1FirstBlock := uint16(data[sec1BlockStart]) | uint16(data[sec1BlockStart+1])<<8
+	sec1FirstBlock := binary.LittleEndian.Uint16(data[sec1BlockStart:])
 	if sec1FirstBlock != 1<<4 {
 		t.Errorf("section 1 first block at offset %d = 0x%04x, want 0x%04x (stone); data may be interleaved instead of sequential",
 			sec1BlockStart, sec1FirstBlock, uint16(1<<4))
