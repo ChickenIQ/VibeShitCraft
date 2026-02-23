@@ -29,6 +29,7 @@ func ReadPacket(r io.Reader) (*Packet, error) {
 	if err != nil {
 		return nil, err
 	}
+	fmt.Printf("DEBUG ReadPacket: length=%d\n", length)
 	if length < 1 {
 		return nil, fmt.Errorf("packet length too small: %d", length)
 	}
@@ -47,6 +48,7 @@ func ReadPacket(r io.Reader) (*Packet, error) {
 	if err != nil {
 		return nil, err
 	}
+	fmt.Printf("DEBUG ReadPacket: id=0x%02X\n", packetID)
 
 	return &Packet{
 		ID:   packetID,
@@ -67,6 +69,7 @@ func WritePacket(w io.Writer, p *Packet) error {
 	if err != nil {
 		return err
 	}
+	fmt.Printf("DEBUG WritePacket: id=0x%02X, len=%d\n", p.ID, len(p.Data))
 	_, err = w.Write(p.Data)
 	return err
 }

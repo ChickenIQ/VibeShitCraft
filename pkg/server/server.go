@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"strings"
@@ -1162,12 +1163,32 @@ func (s *Server) handleAttack(attacker *Player, targetID int32) {
 		target.IsDead = true
 	}
 	isDead := target.IsDead
+
+	// Calculate knockback
+	attackerX, attackerZ := attacker.X, attacker.Z
+	targetX, targetZ := target.X, target.Z
 	target.mu.Unlock()
 
 	// Broadcast damage animation (1 = take damage)
 	s.broadcastAnimation(target, 1)
 	// Broadcast hurt status (2 = hurt)
 	s.broadcastEntityStatus(target.EntityID, 2)
+
+	// Apply knockback if not dead
+	if !isDead {
+		dx := targetX - attackerX
+		dz := targetZ - attackerZ
+		dist := math.Sqrt(dx*dx + dz*dz)
+
+		if dist > 0 {
+			// Normalize and scale
+			vx := (dx / dist) * 0.4
+			vz := (dz / dist) * 0.4
+			vy := 0.4 // Small upward pop
+
+			s.sendEntityVelocity(target, vx, vy, vz)
+		}
+	}
 
 	// Update health for the target player
 	s.sendHealth(target)
@@ -1178,6 +1199,27 @@ func (s *Server) handleAttack(attacker *Player, targetID int32) {
 		// Broadcast death message
 		s.broadcastChat(chat.Colored(target.Username+" was slain by "+attacker.Username, "red"))
 		log.Printf("Player %s was slain by %s", target.Username, attacker.Username)
+	}
+}
+
+func (s *Server) sendEntityVelocity(player *Player, vx, vy, vz float64) {
+	log.Printf("Sending velocity to %s: %f, %f, %f", player.Username, vx, vy, vz)
+	// Entity Velocity packet (0x12)
+	// Velocity is in units of 1/8000 blocks per tick.
+	pkt := protocol.MarshalPacket(0x12, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, player.EntityID)
+		protocol.WriteInt16(w, int16(vx*8000))
+		protocol.WriteInt16(w, int16(vy*8000))
+		protocol.WriteInt16(w, int16(vz*8000))
+	})
+
+	player.mu.Lock()
+	err := protocol.WritePacket(player.Conn, pkt)
+	player.mu.Unlock()
+	if err != nil {
+		log.Printf("Failed to write velocity packet: %v", err)
+	} else {
+		log.Printf("Successfully wrote velocity packet")
 	}
 }
 
