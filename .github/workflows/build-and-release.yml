@@ -39,6 +39,12 @@ jobs:
       - name: Build Linux MIPSBE
         run: GOOS=linux GOARCH=mips go build -o vibeshitcraft-linux-mipsbe ./cmd/server/
 
+      - name: Build Linux ppc64
+        run: GOOS=linux GOARCH=ppc64 go build -o vibeshitcraft-linux-ppc64 ./cmd/server/
+
+      - name: Build Linux ppc64le
+        run: GOOS=linux GOARCH=ppc64le go build -o vibeshitcraft-linux-ppc64le ./cmd/server/
+
       - name: Build Windows amd64
         run: GOOS=windows GOARCH=amd64 go build -o vibeshitcraft-windows-amd64.exe ./cmd/server/
 
@@ -68,6 +74,8 @@ jobs:
             vibeshitcraft-linux-armv7
             vibeshitcraft-linux-mipsle-softfloat
             vibeshitcraft-linux-mipsbe
+            vibeshitcraft-linux-ppc64
+            vibeshitcraft-linux-ppc64le
             vibeshitcraft-windows-amd64.exe
             vibeshitcraft-windows-x86.exe
             vibeshitcraft-darwin-amd64
