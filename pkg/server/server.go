@@ -1528,7 +1528,12 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 		protocol.WriteInt32(w, int32(z*32)) // Fixed-point Z
 		protocol.WriteByte(w, byte(yaw*256/360))
 		protocol.WriteByte(w, byte(pitch*256/360))
-		protocol.WriteInt16(w, 0)   // Current item
+		protocol.WriteInt16(w, 0) // Current item
+		// Minimal entity metadata so clients always receive a non-empty
+		// DataWatcher list for spawned players:
+		// Index 0, type 0 (byte) = entity flags, value 0
+		protocol.WriteByte(w, 0x00) // header: (type 0 << 5) | index 0
+		protocol.WriteByte(w, 0x00) // flags = 0
 		protocol.WriteByte(w, 0x7F) // Metadata terminator
 	})
 	viewer.mu.Lock()
@@ -1644,6 +1649,13 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 		return
 	}
 
+	// Broadcast block break effect *before* changing the block state so that
+	// the client still sees the correct block at this position when rendering
+	// particles/sound. Sending the effect after turning the block into air
+	// can cause client-side crashes for certain blocks (like stairs) that
+	// expect specific properties on the block state.
+	s.broadcastBlockBreakEffect(player, x, y, z, blockState)
+
 	// Handle multi-block structures (doors, double plants)
 	metadata := int16(blockState & 0x0F)
 	isUpperHalf := metadata&0x08 != 0
@@ -1676,9 +1688,6 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 
 	// Broadcast block change (air) to all players
 	s.broadcastBlockChange(x, y, z, 0)
-
-	// Broadcast block break effect (particles/sound) to other players
-	s.broadcastBlockBreakEffect(player, x, y, z, blockState)
 
 	// In creative mode, don't give items on break
 	if player.GameMode == GameModeCreative {
