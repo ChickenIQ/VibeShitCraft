@@ -442,14 +442,18 @@ func TestSpectatorNoClipOnJoin(t *testing.T) {
 		MOTD:            "Test",
 		DefaultGameMode: GameModeSpectator,
 	}
-	s := New(config)
+	srv := New(config)
 
-	// Create a player with the default spectator gamemode
+	if srv.config.DefaultGameMode != GameModeSpectator {
+		t.Fatalf("DefaultGameMode = %d, want %d", srv.config.DefaultGameMode, GameModeSpectator)
+	}
+
+	// Create a player with the default spectator gamemode (mimics player creation logic)
 	player := &Player{
 		EntityID: 1,
 		Username: "Tester",
-		GameMode: s.config.DefaultGameMode,
-		NoClip:   s.config.DefaultGameMode == GameModeSpectator,
+		GameMode: srv.config.DefaultGameMode,
+		NoClip:   srv.config.DefaultGameMode == GameModeSpectator,
 	}
 
 	if !player.NoClip {
@@ -458,8 +462,6 @@ func TestSpectatorNoClipOnJoin(t *testing.T) {
 	if player.GameMode != GameModeSpectator {
 		t.Errorf("GameMode = %d, want %d", player.GameMode, GameModeSpectator)
 	}
-
-	_ = s // use server
 }
 
 func TestPlayerListRemoveOnDisconnect(t *testing.T) {
