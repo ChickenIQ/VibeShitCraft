@@ -867,16 +867,17 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			player.mu.Lock()
 			slotIndex := 36 + player.ActiveSlot
 			slot := player.Inventory[slotIndex]
-			player.mu.Unlock()
 
 			// Spawn eggs used in air (use item) — spawn at player's look position
 			if itemID == 383 {
-				player.mu.Lock()
 				px, py, pz := player.X, player.Y, player.Z
-				player.mu.Unlock()
 				mobType := byte(slot.Damage)
+				gameMode := player.GameMode
+				player.mu.Unlock()
+
 				s.SpawnMob(px, py+1.0, pz, mobType)
-				if player.GameMode == GameModeSurvival {
+
+				if gameMode == GameModeSurvival {
 					player.mu.Lock()
 					si := 36 + player.ActiveSlot
 					player.Inventory[si].Count--
@@ -894,12 +895,11 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 					}
 					player.mu.Unlock()
 				}
-				log.Printf("Player %s used spawn egg (mob type %d) in air", player.Username, slot.Damage)
+				log.Printf("Player %s used spawn egg (mob type %d) in air", player.Username, mobType)
 				return
 			}
 
 			log.Printf("Aborting USE ITEM for %d. Server thinks active slot %d (index %d) has item %d:%d qty %d", itemID, player.ActiveSlot, slotIndex, slot.ItemID, slot.Damage, slot.Count)
-			player.mu.Lock()
 			pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
 				protocol.WriteByte(w, 0) // Window ID 0 = player inventory
 				protocol.WriteInt16(w, int16(slotIndex))
@@ -919,11 +919,12 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			slotIndex := 36 + player.ActiveSlot
 			slot := player.Inventory[slotIndex]
 			mobType := byte(slot.Damage)
+			gameMode := player.GameMode
 			player.mu.Unlock()
 
 			s.SpawnMob(float64(tx)+0.5, float64(ty), float64(tz)+0.5, mobType)
 
-			if player.GameMode == GameModeSurvival {
+			if gameMode == GameModeSurvival {
 				player.mu.Lock()
 				player.Inventory[slotIndex].Count--
 				if player.Inventory[slotIndex].Count <= 0 {
