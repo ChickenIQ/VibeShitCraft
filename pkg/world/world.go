@@ -7,10 +7,22 @@ type BlockPos struct {
 	X, Y, Z int32
 }
 
-// World tracks the state of all blocks, including modifications.
+// ChunkPos represents a chunk position in the world.
+type ChunkPos struct {
+	X, Z int32
+}
+
+// Chunk represents a realized chunk column.
+type Chunk struct {
+	Sections [SectionsPerChunk][ChunkSectionSize]uint16
+	Biomes   [256]byte
+}
+
+// World tracks the state of all blocks, including modifications and cached chunks.
 type World struct {
 	mu     sync.RWMutex
-	blocks map[BlockPos]uint16 // block state: blockID << 4 | metadata
+	blocks map[BlockPos]uint16 // manual block overrides (set by SetBlock)
+	chunks map[ChunkPos]*Chunk // realized chunk cache
 	Gen    *Generator
 }
 
@@ -18,26 +30,130 @@ type World struct {
 func NewWorld(seed int64) *World {
 	return &World{
 		blocks: make(map[BlockPos]uint16),
+		chunks: make(map[ChunkPos]*Chunk),
 		Gen:    NewGenerator(seed),
 	}
 }
 
 // GetBlock returns the block state (blockID << 4 | metadata) at the given position.
 func (w *World) GetBlock(x, y, z int32) uint16 {
+	if y < 0 || y > 255 {
+		return 0
+	}
+
 	w.mu.RLock()
+	// Check overrides first
 	if b, ok := w.blocks[BlockPos{x, y, z}]; ok {
 		w.mu.RUnlock()
 		return b
 	}
+
+	// Check chunk cache
+	cp := ChunkPos{x >> 4, z >> 4}
+	if chunk, ok := w.chunks[cp]; ok {
+		w.mu.RUnlock()
+		lx, ly, lz := x&0x0F, y&0x0F, z&0x0F
+		sec := y >> 4
+		return chunk.Sections[sec][(ly*16+lz)*16+lx]
+	}
 	w.mu.RUnlock()
-	return w.Gen.BlockAt(int(x), int(y), int(z))
+
+	// Realize chunk
+	w.mu.Lock()
+	// Double-check after lock
+	if chunk, ok := w.chunks[cp]; ok {
+		w.mu.Unlock()
+		lx, ly, lz := x&0x0F, y&0x0F, z&0x0F
+		sec := y >> 4
+		return chunk.Sections[sec][(ly*16+lz)*16+lx]
+	}
+
+	sections, biomes := w.Gen.GenerateInternal(int(cp.X), int(cp.Z))
+	chunk := &Chunk{
+		Sections: sections,
+		Biomes:   biomes,
+	}
+
+	// Apply ALL existing overrides for this chunk to the realized chunk
+	// This ensures consistency even if modifications happen before realization.
+	for pos, state := range w.blocks {
+		if pos.X>>4 == cp.X && pos.Z>>4 == cp.Z {
+			lx, ly, lz := pos.X&0x0F, pos.Y&0x0F, pos.Z&0x0F
+			sec := pos.Y >> 4
+			chunk.Sections[sec][(ly*16+lz)*16+lx] = state
+		}
+	}
+
+	w.chunks[cp] = chunk
+	w.mu.Unlock()
+
+	lx, ly, lz := x&0x0F, y&0x0F, z&0x0F
+	sec := y >> 4
+	return chunk.Sections[sec][(ly*16+lz)*16+lx]
 }
 
 // SetBlock sets the block state at the given position.
 func (w *World) SetBlock(x, y, z int32, state uint16) {
+	if y < 0 || y > 255 {
+		return
+	}
+
 	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	// Record the modification
 	w.blocks[BlockPos{x, y, z}] = state
+
+	// Update cached chunk if it exists
+	cp := ChunkPos{x >> 4, z >> 4}
+	if chunk, ok := w.chunks[cp]; ok {
+		lx, ly, lz := x&0x0F, y&0x0F, z&0x0F
+		sec := y >> 4
+		chunk.Sections[sec][(ly*16+lz)*16+lx] = state
+	}
+}
+
+
+// GetChunkData returns the serialized chunk data for the given chunk coordinates.
+// It uses cached chunks if available, otherwise it realizes them.
+func (w *World) GetChunkData(cx, cz int32) ([]byte, uint16) {
+	w.mu.RLock()
+	cp := ChunkPos{cx, cz}
+	if chunk, ok := w.chunks[cp]; ok {
+		data, mask := SerializeSections(&chunk.Sections, chunk.Biomes)
+		w.mu.RUnlock()
+		return data, mask
+	}
+	w.mu.RUnlock()
+
+	// Realize chunk
+	w.mu.Lock()
+	if chunk, ok := w.chunks[cp]; ok {
+		data, mask := SerializeSections(&chunk.Sections, chunk.Biomes)
+		w.mu.Unlock()
+		return data, mask
+	}
+
+	sections, biomes := w.Gen.GenerateInternal(int(cx), int(cz))
+	chunk := &Chunk{
+		Sections: sections,
+		Biomes:   biomes,
+	}
+
+	// Apply ALL existing overrides for this chunk to the realized chunk
+	for pos, state := range w.blocks {
+		if pos.X>>4 == cx && pos.Z>>4 == cz {
+			lx, ly, lz := pos.X&0x0F, pos.Y&0x0F, pos.Z&0x0F
+			sec := pos.Y >> 4
+			chunk.Sections[sec][(ly*16+lz)*16+lx] = state
+		}
+	}
+
+	w.chunks[cp] = chunk
+	data, mask := SerializeSections(&chunk.Sections, chunk.Biomes)
 	w.mu.Unlock()
+
+	return data, mask
 }
 
 // GetModifications returns a copy of all modified blocks.
@@ -68,38 +184,110 @@ func FlatWorldBlock(y int32) uint16 {
 	}
 }
 
-// BlockToItemID returns the item ID and damage (metadata) that should be dropped when a block is broken.
+// BlockToItemID returns the item ID, damage (metadata), and count that should be dropped when a block is broken.
 // Returns -1 for itemID if the block should not drop anything.
-func BlockToItemID(blockState uint16) (int16, int16) {
+func BlockToItemID(blockState uint16) (int16, int16, byte) {
 	blockID := blockState >> 4
 	metadata := int16(blockState & 0x0F)
 
 	switch blockID {
 	case 0: // air
-		return -1, 0
+		return -1, 0, 0
 	case 7: // bedrock
-		return -1, 0
+		return -1, 0, 0
 	case 8, 9, 10, 11: // water/lava
-		return -1, 0
+		return -1, 0, 0
 	case 20, 95, 102: // glass, glass panes
-		return -1, 0
+		return -1, 0, 0
 	case 2: // grass block -> drops dirt
-		return 3, 0
+		return 3, 0, 1
 	case 1: // stone -> drops cobblestone
-		return 4, 0
-	case 17, 162: // logs -> drop themselves
-		return int16(blockID), metadata
+		return 4, 0, 1
+	case 17, 162: // logs -> drop themselves, strip rotation/orientation
+		// Log metadata: lowest 2 bits are wood type, next 2 are orientation
+		return int16(blockID), metadata & 0x03, 1
 	case 18, 161: // leaves -> chance to drop saplings, but for now drop nothing
-		return -1, 0
+		return -1, 0, 0
 	case 31: // tall grass -> drops nothing (unless shears)
-		return -1, 0
-	case 59: // wheat -> drops wheat item (ID 296)
-		return 296, 0
+		return -1, 0, 0
+	case 59: // wheat
+		if metadata == 7 { // Fully grown
+			return 296, 0, 1 // Wheat item
+		}
+		return 295, 0, 1 // Wheat seeds
 	case 60: // farmland -> drops dirt
-		return 3, 0
-	case 64: // wooden door block -> drops oak door item (ID 324)
-		return 324, 0
+		return 3, 0, 1
+	case 64: // oak door block
+		if metadata&0x08 != 0 {
+			return -1, 0, 0 // Only drop from bottom half
+		}
+		return 324, 0, 1
+	case 71: // iron door block
+		if metadata&0x08 != 0 {
+			return -1, 0, 0
+		}
+		return 330, 0, 1
+	case 193: // spruce door block
+		if metadata&0x08 != 0 {
+			return -1, 0, 0
+		}
+		return 427, 0, 1
+	case 194: // birch door block
+		if metadata&0x08 != 0 {
+			return -1, 0, 0
+		}
+		return 428, 0, 1
+	case 195: // jungle door block
+		if metadata&0x08 != 0 {
+			return -1, 0, 0
+		}
+		return 429, 0, 1
+	case 196: // acacia door block
+		if metadata&0x08 != 0 {
+			return -1, 0, 0
+		}
+		return 430, 0, 1
+	case 197: // dark oak door block
+		if metadata&0x08 != 0 {
+			return -1, 0, 0
+		}
+		return 431, 0, 1
+	case 175: // double plant
+		if metadata&0x08 != 0 {
+			return -1, 0, 0
+		}
+		return 175, metadata & 0x07, 1
+	case 53, 67, 108, 109, 114, 128, 134, 135, 136, 156, 163, 164, 180: // stairs
+		return int16(blockID), 0, 1 // Stairs item has no metadata for orientation
+	case 16: // coal ore -> coal
+		return 263, 0, 1
+	case 56: // diamond ore -> diamond
+		return 264, 0, 1
+	case 73, 74: // redstone ore -> redstone
+		return 331, 0, 4 // roughly 4-5
+	case 21: // lapis ore -> lapis dye (ID 351, meta 4)
+		return 351, 4, 6 // roughly 4-8
+	case 129: // emerald ore -> emerald
+		return 388, 0, 1
+	case 153: // quartz ore -> quartz
+		return 406, 0, 1
+	case 82: // clay block -> 4 clay balls
+		return 337, 0, 4
+	case 89: // glowstone -> 2-4 glowstone dust
+		return 348, 0, 3
+	case 169: // sea lantern -> 2-3 prismarine crystals
+		return 410, 0, 2
+	case 3: // dirt
+		return 3, 0, 1
+	case 4: // cobblestone
+		return 4, 0, 1
+	case 5: // planks
+		return 5, metadata, 1
+	case 12: // sand
+		return 12, metadata, 1
+	case 13: // gravel
+		return 13, 0, 1
 	default:
-		return int16(blockID), metadata
+		return int16(blockID), metadata, 1
 	}
 }

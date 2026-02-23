@@ -59,10 +59,20 @@ type Server struct {
 	config   Config
 	listener net.Listener
 	players  map[int32]*Player
+	entities map[int32]*ItemEntity
 	mu       sync.RWMutex
 	nextEID  int32
 	stopCh   chan struct{}
 	world    *world.World
+}
+
+// ItemEntity represents an item dropped on the ground.
+type ItemEntity struct {
+	EntityID int32
+	ItemID   int16
+	Damage   int16
+	Count    byte
+	X, Y, Z  float64
 }
 
 // Slot represents an inventory slot.
@@ -101,11 +111,12 @@ func New(config Config) *Server {
 	}
 	log.Printf("World seed: %d", seed)
 	return &Server{
-		config:  config,
-		players: make(map[int32]*Player),
-		nextEID: 1,
-		stopCh:  make(chan struct{}),
-		world:   world.NewWorld(seed),
+		config:   config,
+		players:  make(map[int32]*Player),
+		entities: make(map[int32]*ItemEntity),
+		nextEID:  1,
+		stopCh:   make(chan struct{}),
+		world:    world.NewWorld(seed),
 	}
 }
 
@@ -378,9 +389,14 @@ func (s *Server) handlePlay(player *Player) {
 	stopRegen := make(chan struct{})
 	go s.regenerationLoop(player, stopRegen)
 
+	// Start item pickup loop
+	stopPickup := make(chan struct{})
+	go s.itemPickupLoop(player, stopPickup)
+
 	defer func() {
 		close(stopKeepAlive)
 		close(stopRegen)
+		close(stopPickup)
 		s.mu.Lock()
 		delete(s.players, player.EntityID)
 		s.mu.Unlock()
@@ -393,6 +409,9 @@ func (s *Server) handlePlay(player *Player) {
 	// Spawn this player for others and others for this player
 	s.spawnPlayerForOthers(player)
 	s.spawnOthersForPlayer(player)
+
+	// Spawn existing item entities for this player
+	s.spawnEntitiesForPlayer(player)
 
 	// Main packet read loop
 	for {
@@ -612,7 +631,14 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 
 		// Validate slot range (0-44 for player inventory, -1 for dropping)
 		if slotNum == -1 {
-			// Player is dropping an item — ignore for now
+			// Player is dropping an item
+			player.mu.Lock()
+			px, py, pz := player.X, player.Y, player.Z
+			player.mu.Unlock()
+			if itemID != -1 {
+				s.SpawnItem(px, py+1.5, pz, itemID, damage, count)
+				log.Printf("Player %s dropped item %d:%d (creative)", player.Username, itemID, damage)
+			}
 			return
 		}
 		if slotNum < 0 || slotNum > 44 {
@@ -682,7 +708,7 @@ func (s *Server) sendChunkColumn(player *Player, cx, cz int32) {
 	player.loadedChunks[pos] = true
 	player.mu.Unlock()
 
-	chunkData, primaryBitMask := s.world.Gen.GenerateChunkData(int(cx), int(cz))
+	chunkData, primaryBitMask := s.world.GetChunkData(int32(cx), int32(cz))
 	pkt := protocol.MarshalPacket(0x21, func(w *bytes.Buffer) {
 		protocol.WriteInt32(w, cx)                     // Chunk X
 		protocol.WriteInt32(w, cz)                     // Chunk Z
@@ -771,7 +797,9 @@ func (s *Server) broadcastChat(msg chat.Message) {
 	defer s.mu.RUnlock()
 	for _, p := range s.players {
 		p.mu.Lock()
-		protocol.WritePacket(p.Conn, pkt)
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
 		p.mu.Unlock()
 	}
 }
@@ -798,6 +826,44 @@ func (s *Server) spawnOthersForPlayer(player *Player) {
 		}
 		s.sendSpawnPlayer(player, other)
 	}
+}
+
+func (s *Server) spawnEntitiesForPlayer(player *Player) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, entity := range s.entities {
+		s.sendItemToPlayer(player, entity)
+	}
+}
+
+func (s *Server) sendItemToPlayer(player *Player, item *ItemEntity) {
+	// Spawn Object - 0x0E (Item Stack)
+	spawnObj := protocol.MarshalPacket(0x0E, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, item.EntityID)
+		protocol.WriteByte(w, 2) // Type: Item Stack
+		protocol.WriteInt32(w, int32(item.X*32))
+		protocol.WriteInt32(w, int32(item.Y*32))
+		protocol.WriteInt32(w, int32(item.Z*32))
+		protocol.WriteByte(w, 0)  // Pitch
+		protocol.WriteByte(w, 0)  // Yaw
+		protocol.WriteInt32(w, 0) // Data (needs to be non-zero for some objects, but 0 often means no velocity)
+	})
+
+	// Entity Metadata - 0x1C
+	metadata := protocol.MarshalPacket(0x1C, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, item.EntityID)
+		// Metadata for item stack (index 10, type 5: Slot)
+		// Header byte: (type << 5) | (index & 0x1F)
+		protocol.WriteByte(w, (5<<5)|10)
+		protocol.WriteSlotData(w, item.ItemID, item.Count, item.Damage)
+		protocol.WriteByte(w, 0x7F) // Terminator
+	})
+
+	player.mu.Lock()
+	protocol.WritePacket(player.Conn, spawnObj)
+	protocol.WritePacket(player.Conn, metadata)
+	player.mu.Unlock()
 }
 
 func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
@@ -933,7 +999,9 @@ func (s *Server) broadcastDestroyEntity(entityID int32) {
 	defer s.mu.RUnlock()
 	for _, p := range s.players {
 		p.mu.Lock()
-		protocol.WritePacket(p.Conn, pkt)
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
 		p.mu.Unlock()
 	}
 }
@@ -945,6 +1013,33 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 	// Don't break air or bedrock
 	if blockID == 0 || blockID == 7 {
 		return
+	}
+
+	// Handle multi-block structures (doors, double plants)
+	metadata := int16(blockState & 0x0F)
+	isUpperHalf := metadata&0x08 != 0
+	
+	var otherY int32
+	if isUpperHalf {
+		otherY = y - 1
+	} else {
+		otherY = y + 1
+	}
+
+	// Check if the other block should also be broken
+	// Doors: 64, 71, 193-197
+	// Double Plants: 175
+	isDoor := blockID == 64 || blockID == 71 || (blockID >= 193 && blockID <= 197)
+	isDoublePlant := blockID == 175
+
+	if isDoor || isDoublePlant {
+		otherState := s.world.GetBlock(x, otherY, z)
+		otherID := otherState >> 4
+		if otherID == blockID {
+			// Break the other half too
+			s.world.SetBlock(x, otherY, z, 0)
+			s.broadcastBlockChange(x, otherY, z, 0)
+		}
 	}
 
 	// Set block to air in world state
@@ -962,28 +1057,16 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 		return
 	}
 
-	// Give item to player
-	itemID, damage := world.BlockToItemID(blockState)
+	// Give item to player by spawning it on the ground
+	itemID, damage, count := world.BlockToItemID(blockState)
 	if itemID < 0 {
 		return
 	}
 
-	player.mu.Lock()
-	slotIndex, ok := addItemToInventory(player, itemID, damage, 1)
-	if ok {
-		slot := player.Inventory[slotIndex]
-		pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
-			protocol.WriteByte(w, 0) // Window ID 0 = player inventory
-			protocol.WriteInt16(w, int16(slotIndex))
-			protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
-		})
-		protocol.WritePacket(player.Conn, pkt)
-	}
-	player.mu.Unlock()
+	// Spawn item at the center of the broken block
+	s.SpawnItem(float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, itemID, damage, count)
 
-	if ok {
-		log.Printf("Player %s broke block %d at (%d, %d, %d), received item %d:%d", player.Username, blockID, x, y, z, itemID, damage)
-	}
+	log.Printf("Player %s broke block %d at (%d, %d, %d), spawned item %d:%d (count: %d)", player.Username, blockID, x, y, z, itemID, damage, count)
 }
 
 func (s *Server) broadcastBlockChange(x, y, z int32, blockState uint16) {
@@ -996,7 +1079,9 @@ func (s *Server) broadcastBlockChange(x, y, z int32, blockState uint16) {
 	defer s.mu.RUnlock()
 	for _, p := range s.players {
 		p.mu.Lock()
-		protocol.WritePacket(p.Conn, pkt)
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
 		p.mu.Unlock()
 	}
 }
@@ -1020,7 +1105,9 @@ func (s *Server) broadcastBlockBreakEffect(breaker *Player, x, y, z int32, block
 			continue // Breaking player already sees the effect client-side
 		}
 		p.mu.Lock()
-		protocol.WritePacket(p.Conn, pkt)
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
 		p.mu.Unlock()
 	}
 }
@@ -1153,7 +1240,9 @@ func (s *Server) broadcastPlayerListGamemode(player *Player) {
 	defer s.mu.RUnlock()
 	for _, p := range s.players {
 		p.mu.Lock()
-		protocol.WritePacket(p.Conn, pkt)
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
 		p.mu.Unlock()
 	}
 }
@@ -1324,7 +1413,9 @@ func (s *Server) broadcastEntityStatus(entityID int32, status byte) {
 	defer s.mu.RUnlock()
 	for _, p := range s.players {
 		p.mu.Lock()
-		protocol.WritePacket(p.Conn, pkt)
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
 		p.mu.Unlock()
 	}
 }
@@ -1445,5 +1536,154 @@ func ParseGameMode(s string) (byte, bool) {
 		return GameModeSpectator, true
 	default:
 		return 0, false
+	}
+}
+
+// SpawnItem creates an item entity at the given position and broadcasts it.
+func (s *Server) SpawnItem(x, y, z float64, itemID int16, damage int16, count byte) {
+	s.mu.Lock()
+	eid := s.nextEID
+	s.nextEID++
+
+	item := &ItemEntity{
+		EntityID: eid,
+		ItemID:   itemID,
+		Damage:   damage,
+		Count:    count,
+		X:        x,
+		Y:        y,
+		Z:        z,
+	}
+	s.entities[eid] = item
+	s.mu.Unlock()
+
+	s.broadcastSpawnItem(item)
+}
+
+func (s *Server) broadcastSpawnItem(item *ItemEntity) {
+	// Spawn Object - 0x0E (Item Stack)
+	spawnObj := protocol.MarshalPacket(0x0E, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, item.EntityID)
+		protocol.WriteByte(w, 2) // Type: Item Stack
+		protocol.WriteInt32(w, int32(item.X*32))
+		protocol.WriteInt32(w, int32(item.Y*32))
+		protocol.WriteInt32(w, int32(item.Z*32))
+		protocol.WriteByte(w, 0)  // Pitch
+		protocol.WriteByte(w, 0)  // Yaw
+		protocol.WriteInt32(w, 0) // Data (needs to be non-zero for some objects, but 0 often means no velocity)
+	})
+
+	// Entity Metadata - 0x1C
+	metadata := protocol.MarshalPacket(0x1C, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, item.EntityID)
+		// Metadata for item stack (index 10, type 5: Slot)
+		// Header byte: (type << 5) | (index & 0x1F)
+		protocol.WriteByte(w, (5<<5)|10)
+		protocol.WriteSlotData(w, item.ItemID, item.Count, item.Damage)
+		protocol.WriteByte(w, 0x7F) // Terminator
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		p.mu.Lock()
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, spawnObj)
+			protocol.WritePacket(p.Conn, metadata)
+		}
+		p.mu.Unlock()
+	}
+}
+
+func (s *Server) broadcastCollectItem(collectedID, collectorID int32) {
+	pkt := protocol.MarshalPacket(0x0D, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, collectedID)
+		protocol.WriteVarInt(w, collectorID)
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		p.mu.Lock()
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
+		p.mu.Unlock()
+	}
+}
+
+func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			s.mu.RLock()
+			if len(s.entities) == 0 {
+				s.mu.RUnlock()
+				continue
+			}
+			// Copy entities to avoid long lock
+			entities := make([]*ItemEntity, 0, len(s.entities))
+			for _, e := range s.entities {
+				entities = append(entities, e)
+			}
+			s.mu.RUnlock()
+
+			player.mu.Lock()
+			px, py, pz := player.X, player.Y, player.Z
+			isDead := player.IsDead
+			player.mu.Unlock()
+
+			if isDead {
+				continue
+			}
+
+			for _, e := range entities {
+				dx := e.X - px
+				dy := e.Y - py
+				dz := e.Z - pz
+				distSq := dx*dx + dy*dy + dz*dz
+
+				if distSq < 4.0 { // 2.0 blocks range
+					// Try to pick up
+					player.mu.Lock()
+					slotIndex, ok := addItemToInventory(player, e.ItemID, e.Damage, e.Count)
+					if ok {
+						// Success!
+						slot := player.Inventory[slotIndex]
+						pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+							protocol.WriteByte(w, 0) // Window ID 0 = player inventory
+							protocol.WriteInt16(w, int16(slotIndex))
+							protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+						})
+						if player.Conn != nil {
+							protocol.WritePacket(player.Conn, pkt)
+						}
+						player.mu.Unlock()
+
+						// Remove entity
+						s.mu.Lock()
+						// Re-check if it's still there (some other player might have picked it up)
+						if _, exists := s.entities[e.EntityID]; exists {
+							delete(s.entities, e.EntityID)
+							s.mu.Unlock()
+
+							// Broadcast collect and destroy
+							s.broadcastCollectItem(e.EntityID, player.EntityID)
+							s.broadcastDestroyEntity(e.EntityID)
+							log.Printf("Player %s picked up item %d:%d", player.Username, e.ItemID, e.Damage)
+						} else {
+							s.mu.Unlock()
+						}
+						break // only pick up one item per tick per player for simplicity
+					}
+					player.mu.Unlock()
+				}
+			}
+		}
 	}
 }

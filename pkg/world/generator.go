@@ -360,8 +360,8 @@ func (g *Generator) generateBoulders(chunkX, chunkZ int, sections *[SectionsPerC
 	}
 }
 
-// GenerateChunkData produces the complete 1.8 chunk column data for (chunkX, chunkZ).
-func (g *Generator) GenerateChunkData(chunkX, chunkZ int) ([]byte, uint16) {
+// GenerateInternal produces the raw chunk data (sections and biomes).
+func (g *Generator) GenerateInternal(chunkX, chunkZ int) ([SectionsPerChunk][ChunkSectionSize]uint16, [256]byte) {
 	var sections [SectionsPerChunk][ChunkSectionSize]uint16
 	var biomes [256]byte
 
@@ -396,12 +396,17 @@ func (g *Generator) GenerateChunkData(chunkX, chunkZ int) ([]byte, uint16) {
 	// Place trees
 	g.generateTrees(chunkX, chunkZ, &sections)
 
-	// Serialize
-	return serializeSections(&sections, biomes)
+	return sections, biomes
 }
 
-// serializeSections converts populated section arrays into 1.8 chunk wire format.
-func serializeSections(sections *[SectionsPerChunk][ChunkSectionSize]uint16, biomes [256]byte) ([]byte, uint16) {
+// GenerateChunkData produces the complete 1.8 chunk column data for (chunkX, chunkZ).
+func (g *Generator) GenerateChunkData(chunkX, chunkZ int) ([]byte, uint16) {
+	sections, biomes := g.GenerateInternal(chunkX, chunkZ)
+	return SerializeSections(&sections, biomes)
+}
+
+// SerializeSections converts populated section arrays into 1.8 chunk wire format.
+func SerializeSections(sections *[SectionsPerChunk][ChunkSectionSize]uint16, biomes [256]byte) ([]byte, uint16) {
 	var primaryBitMask uint16
 	var buf bytes.Buffer
 
