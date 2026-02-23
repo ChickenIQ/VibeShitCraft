@@ -26,6 +26,11 @@ const (
 	GameModeSpectator byte = 3
 )
 
+// Entity metadata flags (index 0, type byte).
+const (
+	EntityFlagInvisible byte = 0x20
+)
+
 // DefaultSeed is used when no seed is provided (0 means random).
 const DefaultSeed = 0
 
@@ -1744,10 +1749,10 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 	protocol.WritePacket(viewer.Conn, playerListAdd)
 	viewer.mu.Unlock()
 
-	// Entity flags: set invisible (0x20) for spectators
+	// Entity flags: set invisible for spectators
 	var entityFlags byte
 	if targetGameMode == GameModeSpectator {
-		entityFlags = 0x20
+		entityFlags = EntityFlagInvisible
 	}
 
 	// Spawn Player - 0x0C
@@ -1765,7 +1770,7 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 		// DataWatcher list for spawned players:
 		// Index 0, type 0 (byte) = entity flags
 		protocol.WriteByte(w, 0x00)        // header: (type 0 << 5) | index 0
-		protocol.WriteByte(w, entityFlags) // flags (0x20 = invisible for spectators)
+		protocol.WriteByte(w, entityFlags) // flags (EntityFlagInvisible for spectators)
 		protocol.WriteByte(w, 0x7F)        // Metadata terminator
 	})
 	viewer.mu.Lock()
@@ -2400,7 +2405,7 @@ func (s *Server) broadcastEntityFlags(player *Player) {
 	player.mu.Lock()
 	var flags byte
 	if player.GameMode == GameModeSpectator {
-		flags = 0x20 // Invisible
+		flags = EntityFlagInvisible
 	}
 	entityID := player.EntityID
 	player.mu.Unlock()
