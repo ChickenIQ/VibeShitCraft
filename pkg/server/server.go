@@ -615,11 +615,37 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 
 		// Special position (-1, -1, -1) means "use item" not placement
 		if x == -1 && y == 255 && z == -1 {
+			player.mu.Lock()
+			slotIndex := 36 + player.ActiveSlot
+			slot := player.Inventory[slotIndex]
+			pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+				protocol.WriteByte(w, 0) // Window ID 0 = player inventory
+				protocol.WriteInt16(w, int16(slotIndex))
+				protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+			})
+			if player.Conn != nil {
+				protocol.WritePacket(player.Conn, pkt)
+			}
+			player.mu.Unlock()
 			return
 		}
 
 		// Don't place air
 		if itemID <= 0 || itemID > 255 {
+			// Abort placement, but we MUST resync the slot so the client doesn't
+			// think they successfully placed it and temporarily lose the item visually.
+			player.mu.Lock()
+			slotIndex := 36 + player.ActiveSlot
+			slot := player.Inventory[slotIndex]
+			pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+				protocol.WriteByte(w, 0) // Window ID 0 = player inventory
+				protocol.WriteInt16(w, int16(slotIndex))
+				protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+			})
+			if player.Conn != nil {
+				protocol.WritePacket(player.Conn, pkt)
+			}
+			player.mu.Unlock()
 			return
 		}
 
