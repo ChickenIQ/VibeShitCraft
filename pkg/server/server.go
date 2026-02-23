@@ -501,11 +501,11 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		// Ignore for now
 
 	case 0x13: // Player Abilities (serverbound)
+		// Client sends this when toggling flying — just consume the data.
+		// We do NOT respond, to avoid overriding the client's flying/noclip state.
 		_, _ = protocol.ReadByte(r)    // Flags from client
 		_, _ = protocol.ReadFloat32(r) // Flying speed
 		_, _ = protocol.ReadFloat32(r) // Walking speed
-		// Respond with the server-authoritative abilities for this gamemode
-		s.sendPlayerAbilities(player)
 
 	case 0x17: // Plugin Message
 		// Ignore for now
@@ -1081,6 +1081,30 @@ func (s *Server) sendPlayerAbilities(player *Player) {
 	player.mu.Unlock()
 }
 
+// broadcastPlayerListGamemode sends a Player List Item (action=1, Update Gamemode)
+// to all players, updating the target player's gamemode in the tab list.
+func (s *Server) broadcastPlayerListGamemode(player *Player) {
+	player.mu.Lock()
+	gameMode := player.GameMode
+	uuid := player.UUID
+	player.mu.Unlock()
+
+	pkt := protocol.MarshalPacket(0x38, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, 1)                  // Action: Update Gamemode
+		protocol.WriteVarInt(w, 1)                  // Number of players
+		protocol.WriteUUID(w, uuid)
+		protocol.WriteVarInt(w, int32(gameMode))    // New gamemode
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		p.mu.Lock()
+		protocol.WritePacket(p.Conn, pkt)
+		p.mu.Unlock()
+	}
+}
+
 // sendChatToPlayer sends a chat message to a single player.
 func (s *Server) sendChatToPlayer(player *Player, msg chat.Message) {
 	jsonMsg := msg.String()
@@ -1148,6 +1172,9 @@ func (s *Server) handleGamemodeCommand(player *Player, args []string) {
 
 	// Send updated abilities
 	s.sendPlayerAbilities(player)
+
+	// Update gamemode in player list for all clients
+	s.broadcastPlayerListGamemode(player)
 
 	// Feedback
 	modeName := GameModeName(mode)

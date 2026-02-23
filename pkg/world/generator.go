@@ -31,52 +31,17 @@ func NewGenerator(seed int64) *Generator {
 	}
 }
 
+// FlatSurfaceY is the surface level for the flat world.
+const FlatSurfaceY = 3
+
 // SurfaceHeight returns the solid surface Y for the given world-space x, z.
 func (g *Generator) SurfaceHeight(x, z int) int {
-	biome := BiomeAt(g.tempNoise, g.rainNoise, x, z)
-
-	// Broad terrain shape — large rolling hills/valleys
-	const broadScale = 0.005
-	n := g.terrain.OctaveNoise2D(float64(x)*broadScale, float64(z)*broadScale, 6, 2.0, 0.5)
-	// n is in [-1, 1] — map to [0, 1]
-	n = (n + 1) / 2
-
-	// Fine detail roughness — smaller bumps and ridges
-	const detailScale = 0.03
-	detail := g.roughness.OctaveNoise2D(float64(x)*detailScale, float64(z)*detailScale, 4, 2.0, 0.5)
-	// detail is in [-1, 1] — scale to ±4 blocks of micro variation
-	detailHeight := detail * 4.0
-
-	// Medium scale hills — intermediate features
-	const medScale = 0.012
-	med := g.terrain.OctaveNoise2D(float64(x)*medScale+1000, float64(z)*medScale+1000, 4, 2.0, 0.5)
-	medHeight := med * biome.HeightVariation * 0.3
-
-	height := biome.BaseHeight + int(n*biome.HeightVariation) + int(medHeight) + int(detailHeight)
-	if height < 1 {
-		height = 1
-	}
-	if height > 250 {
-		height = 250
-	}
-	return height
+	return FlatSurfaceY
 }
 
 // isCave returns true if the block at (x,y,z) should be carved into a cave.
 func (g *Generator) isCave(x, y, z int) bool {
-	if y <= 0 || y >= 128 {
-		return false // no caves at bedrock or high up
-	}
-	// Primary cave noise — creates large caverns
-	const scale = 0.04
-	v := g.caveNoise.Noise3D(float64(x)*scale, float64(y)*scale*0.5, float64(z)*scale)
-
-	// Secondary cave noise — creates thinner connecting tunnels
-	const scale2 = 0.08
-	v2 := g.cave2.Noise3D(float64(x)*scale2, float64(y)*scale2*0.7, float64(z)*scale2)
-
-	// Combine: either large cavern or spaghetti tunnel
-	return v > 0.45 || (v2 > 0.55 && v > 0.2)
+	return false // flat world: no caves
 }
 
 // shouldPlaceTree returns true if a tree should be placed at (x, z) given the biome's density.
@@ -94,46 +59,21 @@ func (g *Generator) shouldPlaceTree(x, z int, biome *Biome) bool {
 const WaterLevel = 62
 
 // BlockAt returns the block state at a world-space (x, y, z).
-// This is the authoritative generator lookup used by World.GetBlock as fallback.
+// Flat world: bedrock(0), dirt(1-2), grass(3), air above.
 func (g *Generator) BlockAt(x, y, z int) uint16 {
 	if y < 0 || y > 255 {
 		return 0
 	}
-	if y == 0 {
+	switch {
+	case y == 0:
 		return 7 << 4 // bedrock
-	}
-
-	biome := BiomeAt(g.tempNoise, g.rainNoise, x, z)
-	surfaceY := g.SurfaceHeight(x, z)
-
-	// Cave carving
-	if g.isCave(x, y, z) && y > 1 && y < surfaceY-1 {
-		if y <= WaterLevel {
-			return 9 << 4 // water in low caves
-		}
+	case y < FlatSurfaceY:
+		return 3 << 4 // dirt
+	case y == FlatSurfaceY:
+		return 2 << 4 // grass
+	default:
 		return 0 // air
 	}
-
-	if y < surfaceY-4 {
-		return 1 << 4 // stone
-	}
-	if y < surfaceY {
-		return biome.FillerBlock
-	}
-	if y == surfaceY {
-		// Underwater surfaces get sand/gravel instead of grass
-		if surfaceY < WaterLevel {
-			return 12 << 4 // sand
-		}
-		return biome.SurfaceBlock
-	}
-
-	// Above surface
-	if y <= WaterLevel {
-		return 9 << 4 // water (still)
-	}
-
-	return 0 // air
 }
 
 // generateTrees places simple oak trees into the sections array for a chunk.
@@ -242,58 +182,27 @@ func (g *Generator) GenerateChunkData(chunkX, chunkZ int) ([]byte, uint16) {
 	var sections [SectionsPerChunk][ChunkSectionSize]uint16
 	var biomes [256]byte
 
-	// Fill block data per section
+	// Fill block data per section — flat world
 	for lx := 0; lx < 16; lx++ {
 		for lz := 0; lz < 16; lz++ {
-			wx := chunkX*16 + lx
-			wz := chunkZ*16 + lz
+			biomes[lz*16+lx] = 1 // Plains biome everywhere
 
-			biome := BiomeAt(g.tempNoise, g.rainNoise, wx, wz)
-			biomes[lz*16+lx] = biome.ID
-
-			surfaceY := g.SurfaceHeight(wx, wz)
-
-			for y := 0; y < ChunkHeight; y++ {
+			for y := 0; y <= FlatSurfaceY; y++ {
 				sec := y / 16
 				sy := y % 16
 				idx := (sy*16+lz)*16 + lx
 
-				if y == 0 {
+				switch {
+				case y == 0:
 					sections[sec][idx] = 7 << 4 // bedrock
-					continue
-				}
-
-				// Cave carving
-				if g.isCave(wx, y, wz) && y > 1 && y < surfaceY-1 {
-					if y <= WaterLevel {
-						sections[sec][idx] = 9 << 4 // water
-					} else {
-						sections[sec][idx] = 0 // air
-					}
-					continue
-				}
-
-				if y < surfaceY-4 {
-					sections[sec][idx] = 1 << 4 // stone
-				} else if y < surfaceY {
-					sections[sec][idx] = biome.FillerBlock
-				} else if y == surfaceY {
-					if surfaceY < WaterLevel {
-						sections[sec][idx] = 12 << 4 // sand underwater
-					} else {
-						sections[sec][idx] = biome.SurfaceBlock
-					}
-				} else if y <= WaterLevel {
-					sections[sec][idx] = 9 << 4 // water
-				} else {
-					sections[sec][idx] = 0 // air
+				case y < FlatSurfaceY:
+					sections[sec][idx] = 3 << 4 // dirt
+				case y == FlatSurfaceY:
+					sections[sec][idx] = 2 << 4 // grass
 				}
 			}
 		}
 	}
-
-	// Place trees
-	g.generateTrees(chunkX, chunkZ, &sections)
 
 	// Serialize
 	return serializeSections(&sections, biomes)

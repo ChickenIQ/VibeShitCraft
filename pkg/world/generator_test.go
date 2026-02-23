@@ -74,22 +74,21 @@ func TestBlockAtBoundary(t *testing.T) {
 	}
 }
 
-func TestDifferentChunksVary(t *testing.T) {
+func TestFlatChunksConsistent(t *testing.T) {
 	g := NewGenerator(42)
 
-	data1, _ := g.GenerateChunkData(0, 0)
-	data2, _ := g.GenerateChunkData(10, 10)
+	data1, mask1 := g.GenerateChunkData(0, 0)
+	data2, mask2 := g.GenerateChunkData(10, 10)
 
-	if len(data1) == len(data2) {
-		same := true
-		for i := range data1 {
-			if data1[i] != data2[i] {
-				same = false
-				break
-			}
-		}
-		if same {
-			t.Error("distant chunks produced identical data — terrain not varying")
+	if mask1 != mask2 {
+		t.Errorf("flat world: bitmask differs between chunks: 0x%04x vs 0x%04x", mask1, mask2)
+	}
+	if len(data1) != len(data2) {
+		t.Fatalf("flat world: data length differs: %d vs %d", len(data1), len(data2))
+	}
+	for i := range data1 {
+		if data1[i] != data2[i] {
+			t.Fatalf("flat world: chunk data differs at byte %d", i)
 		}
 	}
 }
