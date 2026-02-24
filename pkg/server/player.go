@@ -47,6 +47,7 @@ type Player struct {
 	NoClip           bool    // True when in spectator mode (can pass through blocks)
 	DragSlots        []int16 // Slots being dragged over in mode 5
 	DragButton       int     // 0=left drag, 1=right drag
+	trackedEntities  map[int32]bool
 	mu               sync.Mutex
 }
 
@@ -71,21 +72,22 @@ func (s *Server) handleLoginStart(conn net.Conn, pkt *protocol.Packet) (*Player,
 	spawnY := float64(s.world.Gen.SurfaceHeight(8, 8)) + 1.0
 
 	player := &Player{
-		EntityID: eid,
-		Username: username,
-		UUID:     uuid,
-		Conn:     conn,
-		State:    protocol.StatePlay,
-		GameMode: s.config.DefaultGameMode,
-		X:        8,
-		Y:        spawnY,
-		Z:        8,
-		Yaw:      0,
-		Pitch:    0,
-		OnGround: true,
-		Health:   20.0,
-		IsDead:   false,
-		NoClip:   s.config.DefaultGameMode == GameModeSpectator,
+		EntityID:        eid,
+		Username:        username,
+		UUID:            uuid,
+		Conn:            conn,
+		State:           protocol.StatePlay,
+		GameMode:        s.config.DefaultGameMode,
+		X:               8,
+		Y:               spawnY,
+		Z:               8,
+		Yaw:             0,
+		Pitch:           0,
+		OnGround:        true,
+		Health:          20.0,
+		IsDead:          false,
+		NoClip:          s.config.DefaultGameMode == GameModeSpectator,
+		trackedEntities: make(map[int32]bool),
 	}
 
 	// Initialize all inventory slots as empty

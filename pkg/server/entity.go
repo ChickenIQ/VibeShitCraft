@@ -429,7 +429,12 @@ func (s *Server) spawnEntitiesForPlayer(player *Player) {
 	defer s.mu.RUnlock()
 
 	for _, entity := range s.entities {
-		s.sendItemToPlayer(player, entity)
+		if s.shouldTrack(player, entity.X, entity.Y, entity.Z) {
+			s.sendItemToPlayer(player, entity)
+			player.mu.Lock()
+			player.trackedEntities[entity.EntityID] = true
+			player.mu.Unlock()
+		}
 	}
 }
 
@@ -457,8 +462,10 @@ func (s *Server) sendItemToPlayer(player *Player, item *ItemEntity) {
 	})
 
 	player.mu.Lock()
-	protocol.WritePacket(player.Conn, spawnObj)
-	protocol.WritePacket(player.Conn, metadata)
+	if player.Conn != nil {
+		protocol.WritePacket(player.Conn, spawnObj)
+		protocol.WritePacket(player.Conn, metadata)
+	}
 	player.mu.Unlock()
 }
 
@@ -467,7 +474,12 @@ func (s *Server) spawnMobEntitiesForPlayer(player *Player) {
 	defer s.mu.RUnlock()
 
 	for _, mob := range s.mobEntities {
-		s.sendMobToPlayer(player, mob)
+		if s.shouldTrack(player, mob.X, mob.Y, mob.Z) {
+			s.sendMobToPlayer(player, mob)
+			player.mu.Lock()
+			player.trackedEntities[mob.EntityID] = true
+			player.mu.Unlock()
+		}
 	}
 }
 

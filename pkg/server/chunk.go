@@ -45,7 +45,9 @@ func (s *Server) sendChunkColumn(player *Player, cx, cz int32) {
 		w.Write(chunkData)                             // Data
 	})
 	player.mu.Lock()
-	protocol.WritePacket(player.Conn, pkt)
+	if player.Conn != nil {
+		protocol.WritePacket(player.Conn, pkt)
+	}
 	player.mu.Unlock()
 }
 
@@ -97,7 +99,12 @@ func (s *Server) sendChunkUpdates(player *Player) {
 			protocol.WriteVarInt(w, 0)  // Size: 0
 		})
 		player.mu.Lock()
-		protocol.WritePacket(player.Conn, pkt)
+		if player.Conn != nil {
+			protocol.WritePacket(player.Conn, pkt)
+		}
 		player.mu.Unlock()
 	}
+
+	// Update entity tracking (e.g. spawn players who just came into range)
+	s.updateEntityTracking(player)
 }

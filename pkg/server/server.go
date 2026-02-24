@@ -37,6 +37,9 @@ func DefaultConfig() Config {
 // ViewDistance is the number of chunks sent around a player in each direction.
 const ViewDistance = 7
 
+// EntityTrackingRange is the distance (in blocks) within which entities are spawned for players.
+const EntityTrackingRange = 48.0
+
 // ChunkPos identifies a chunk by its X and Z coordinates.
 type ChunkPos struct {
 	X, Z int32

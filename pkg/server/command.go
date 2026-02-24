@@ -151,7 +151,9 @@ func (s *Server) teleportPlayer(player *Player, x, y, z float64) {
 		protocol.WriteByte(w, 0) // Flags (all absolute)
 	})
 	player.mu.Lock()
-	protocol.WritePacket(player.Conn, posLook)
+	if player.Conn != nil {
+		protocol.WritePacket(player.Conn, posLook)
+	}
 	player.mu.Unlock()
 
 	// Broadcast teleport to other players
@@ -159,6 +161,9 @@ func (s *Server) teleportPlayer(player *Player, x, y, z float64) {
 
 	// Load/unload chunks around new position
 	s.sendChunkUpdates(player)
+
+	// Update entity tracking at destination
+	s.updateEntityTracking(player)
 }
 
 // handleStopCommand handles the /stop command.
