@@ -248,6 +248,9 @@ func (s *Server) handleBlockPlacement(player *Player, r *bytes.Reader) {
 		})
 		s.mu.RLock()
 		for _, p := range s.players {
+			if p.EntityID == player.EntityID {
+				continue
+			}
 			p.mu.Lock()
 			if p.Conn != nil {
 				protocol.WritePacket(p.Conn, soundPkt)

@@ -161,6 +161,8 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		dandelion    = 37 << 4  // dandelion flower
 		poppy        = 38 << 4  // poppy flower
 		goldBlock    = 41 << 4  // gold block (bell)
+		oakSlab      = 126 << 4 // oak slab
+		bed          = 26 << 4  // bed
 	)
 
 	placeBlock := func(wx, y, wz int, state uint16) {
@@ -188,6 +190,26 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		}
 	}
 
+	// isSafeForPath returns true if the block at (wx, y, wz) is air, grass, or dirt.
+	isSafeForPath := func(wx, y, wz int) bool {
+		lx := wx - originX
+		lz := wz - originZ
+		if y < 0 || y > 255 || lx < 0 || lx > 15 || lz < 0 || lz > 15 {
+			return false
+		}
+		sec := y / 16
+		sy := y % 16
+		currentState := sections[sec][(sy*16+lz)*16+lx]
+		id := currentState >> 4
+		return id == 0 || id == 2 || id == 3 || id == 13 // Air, Grass, Dirt, Gravel
+	}
+
+	placePath := func(wx, y, wz int, state uint16) {
+		if isSafeForPath(wx, y, wz) {
+			placeBlock(wx, y, wz, state)
+		}
+	}
+
 	// ------------------------------------------------------------------
 	// 1. Gravel paths: Main cross + secondary branches
 	// ------------------------------------------------------------------
@@ -195,9 +217,9 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 	for d := -pathLen; d <= pathLen; d++ {
 		for w := -1; w <= 1; w++ {
 			// Main X axis
-			placeBlock(vx+d, surfY, vz+w, gravel)
+			placePath(vx+d, surfY, vz+w, gravel)
 			// Main Z axis
-			placeBlock(vx+w, surfY, vz+d, gravel)
+			placePath(vx+w, surfY, vz+d, gravel)
 		}
 	}
 	// Secondary branches
@@ -205,13 +227,13 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		for w := -1; w <= 1; w++ {
 			// Branch at X=16, going Z
 			if d >= 16 {
-				placeBlock(vx+16+w, surfY, vz+d, gravel)
-				placeBlock(vx-16+w, surfY, vz-d, gravel)
+				placePath(vx+16+w, surfY, vz+d, gravel)
+				placePath(vx-16+w, surfY, vz-d, gravel)
 			}
 			// Branch at Z=16, going X
 			if d >= 16 {
-				placeBlock(vx+d, surfY, vz+16+w, gravel)
-				placeBlock(vx-d, surfY, vz-16+w, gravel)
+				placePath(vx+d, surfY, vz+16+w, gravel)
+				placePath(vx-d, surfY, vz-16+w, gravel)
 			}
 		}
 	}
@@ -222,7 +244,7 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 	// Gravel foundation/path around the well (6x6)
 	for dx := -3; dx <= 2; dx++ {
 		for dz := -3; dz <= 2; dz++ {
-			placeBlock(vx+dx, surfY, vz+dz, gravel)
+			placePath(vx+dx, surfY, vz+dz, gravel)
 		}
 	}
 
@@ -258,12 +280,12 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 	// 3. Structures: Large Hall, Houses, and Farms
 	// ------------------------------------------------------------------
 	// Large Hall (North) - Shifted to vx-3 so door (hx+3) is at vx center path
-	v.buildLargeHall(vx-3, vz+22, surfY, placeBlock, log, planks, cobble, glass, torch, oakStairs, woodenDoor, air)
+	v.buildLargeHall(vx-3, vz+22, surfY, placeBlock, log, planks, cobble, glass, torch, oakStairs, woodenDoor, air, oakSlab, bed)
 
 	// Small Houses
-	v.buildHouse(vx+12, vz+6, surfY, 0, placeBlock, log, planks, cobble, glass, fence, torch, oakStairs, woodenDoor, air)
-	v.buildHouse(vx-12, vz-6, surfY, 1, placeBlock, log, planks, cobble, glass, fence, torch, oakStairs, woodenDoor, air)
-	v.buildHouse(vx+22, vz-12, surfY, 2, placeBlock, log, planks, cobble, glass, fence, torch, oakStairs, woodenDoor, air)
+	v.buildHouse(vx+12, vz+6, surfY, 0, placeBlock, log, planks, cobble, glass, fence, torch, oakStairs, woodenDoor, air, oakSlab, bed)
+	v.buildHouse(vx-12, vz-6, surfY, 1, placeBlock, log, planks, cobble, glass, fence, torch, oakStairs, woodenDoor, air, oakSlab, bed)
+	v.buildHouse(vx+22, vz-12, surfY, 2, placeBlock, log, planks, cobble, glass, fence, torch, oakStairs, woodenDoor, air, oakSlab, bed)
 
 	// Farms
 	// Potential farm locations (avoiding main buildings)
@@ -376,7 +398,7 @@ func (v *VillageGrid) buildFruitFarm(fx, fz, surfY int, place func(wx, y, wz int
 }
 
 // buildLargeHall creates a 7x9 building with a solid symmetrical facade.
-func (v *VillageGrid) buildLargeHall(hx, hz, surfY int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, torch, stairs, door, air uint16) {
+func (v *VillageGrid) buildLargeHall(hx, hz, surfY int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, torch, stairs, door, air, oakSlab, bed uint16) {
 	const w, l = 7, 9
 	const h = 4
 	for dx := 0; dx < w; dx++ {
@@ -426,6 +448,12 @@ func (v *VillageGrid) buildLargeHall(hx, hz, surfY int, place func(wx, y, wz int
 		}
 	}
 
+	// Interior Furniture (Bed)
+	// Place a bed in the back-left corner (hx+1, hz+1)
+	// Foot at (hx+1, hz+2), Head at (hx+1, hz+1) facing North (-Z)
+	place(hx+1, surfY+1, hz+2, bed|2)  // Foot
+	place(hx+1, surfY+1, hz+1, bed|10) // Head
+
 	// Pitched Roof (North-South oriented)
 	for dz := -1; dz <= l; dz++ {
 		// Slope coverage logic (w=7)
@@ -441,7 +469,7 @@ func (v *VillageGrid) buildLargeHall(hx, hz, surfY int, place func(wx, y, wz int
 		place(hx+2, surfY+h+4, hz+dz, stairs|0)
 		place(hx+w-3, surfY+h+4, hz+dz, stairs|1)
 
-		place(hx+3, surfY+h+5, hz+dz, planks) // Ridge
+		place(hx+3, surfY+h+5, hz+dz, oakSlab) // Ridge
 
 		// Gables
 		if dz == 0 || dz == l-1 {
@@ -458,7 +486,7 @@ func (v *VillageGrid) buildLargeHall(hx, hz, surfY int, place func(wx, y, wz int
 }
 
 // buildHouse places a 5x5 plank house with a solid symmetrical facade.
-func (v *VillageGrid) buildHouse(hx, hz, surfY, houseIdx int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, fence, torch, stairs, door, air uint16) {
+func (v *VillageGrid) buildHouse(hx, hz, surfY, houseIdx int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, fence, torch, stairs, door, air, oakSlab, bed uint16) {
 	const w = 5
 	const h = 3
 	for dx := 0; dx < w; dx++ {
@@ -509,6 +537,20 @@ func (v *VillageGrid) buildHouse(hx, hz, surfY, houseIdx int, place func(wx, y, 
 		}
 	}
 
+	// Interior Furniture (Bed)
+	// Bed orientation depends on entrance.
+	if houseIdx%2 == 0 {
+		// Door at Front (dz=w-1=4) facing North (-Z)
+		// Place bed at back (dz=1, dz=2)
+		place(hx+1, surfY+1, hz+2, bed|2)  // Foot
+		place(hx+1, surfY+1, hz+1, bed|10) // Head
+	} else {
+		// Door at Front (dz=0) facing South (+Z)
+		// Place bed at back (dz=3, dz=2)
+		place(hx+3, surfY+1, hz+2, bed|0) // Foot
+		place(hx+3, surfY+1, hz+3, bed|8) // Head
+	}
+
 	// Pitched Roof
 	if houseIdx%2 == 0 {
 		// North-South peak
@@ -519,7 +561,7 @@ func (v *VillageGrid) buildHouse(hx, hz, surfY, houseIdx int, place func(wx, y, 
 			place(hx+dx, surfY+h+2, hz+w-1, stairs|3)
 			place(hx+dx, surfY+h+3, hz+1, stairs|2)
 			place(hx+dx, surfY+h+3, hz+3, stairs|3)
-			place(hx+dx, surfY+h+4, hz+2, planks)
+			place(hx+dx, surfY+h+4, hz+2, oakSlab)
 
 			if dx == 0 || dx == w-1 {
 				for dy := 1; dy <= 3; dy++ {
@@ -542,7 +584,7 @@ func (v *VillageGrid) buildHouse(hx, hz, surfY, houseIdx int, place func(wx, y, 
 			place(hx+w-1, surfY+h+2, hz+dz, stairs|1)
 			place(hx+1, surfY+h+3, hz+dz, stairs|0)
 			place(hx+3, surfY+h+3, hz+dz, stairs|1)
-			place(hx+2, surfY+h+4, hz+dz, planks)
+			place(hx+2, surfY+h+4, hz+dz, oakSlab)
 
 			if dz == 0 || dz == w-1 {
 				for dy := 1; dy <= 3; dy++ {
