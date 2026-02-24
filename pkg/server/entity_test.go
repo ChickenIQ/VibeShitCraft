@@ -315,23 +315,34 @@ func TestItemPickupDelay(t *testing.T) {
 	stop := make(chan struct{})
 	go s.itemPickupLoop(player, stop)
 
-	// Wait for one pickup tick cycle (500ms + buffer)
-	time.Sleep(800 * time.Millisecond)
-	close(stop)
+	// Wait for one pickup tick cycle (200ms interval + buffer)
+	// We wait 300ms to ensure at least one tick has happened
+	time.Sleep(300 * time.Millisecond)
 
-	// The old item (spawned 3s ago) should have been picked up
-	// The recent item (spawned just now) should still exist
 	s.mu.RLock()
 	_, recentExists := s.entities[recentItem.EntityID]
-	_, oldExists := s.entities[oldItem.EntityID]
+	_, oldExistsBefore := s.entities[oldItem.EntityID]
 	s.mu.RUnlock()
 
 	if !recentExists {
 		t.Error("recently spawned item should NOT be picked up due to pickup delay")
 	}
-	if oldExists {
-		t.Error("old item (spawned 3s ago) should have been picked up")
+	if oldExistsBefore {
+		t.Error("old item (spawned 3s ago) should have been picked up immediately")
 	}
+
+	// Wait 600ms more (total 900ms) - item SHOULD be picked up now (750ms delay)
+	time.Sleep(600 * time.Millisecond)
+
+	s.mu.RLock()
+	_, recentExistsNow := s.entities[recentItem.EntityID]
+	s.mu.RUnlock()
+
+	if recentExistsNow {
+		t.Error("item should have been picked up after 750ms delay")
+	}
+
+	close(stop)
 }
 
 func TestItemEntityHasSpawnTime(t *testing.T) {

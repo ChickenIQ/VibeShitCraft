@@ -512,7 +512,7 @@ func (s *Server) broadcastCollectItem(collectedID, collectorID int32) {
 }
 
 func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -542,8 +542,8 @@ func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
 			}
 
 			for _, e := range entities {
-				// Skip recently spawned items (1 second pickup delay)
-				if time.Since(e.SpawnTime) < 1*time.Second {
+				// Skip recently spawned items (0.75 second pickup delay)
+				if time.Since(e.SpawnTime) < 750*time.Millisecond {
 					continue
 				}
 
@@ -552,7 +552,7 @@ func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
 				dz := e.Z - pz
 				distSq := dx*dx + dy*dy + dz*dz
 
-				if distSq < 4.0 { // 2.0 blocks range
+				if distSq < 6.25 { // 2.5 blocks range
 					// Try to pick up
 					player.mu.Lock()
 					slotIndex, ok := addItemToInventory(player, e.ItemID, e.Damage, e.Count)
