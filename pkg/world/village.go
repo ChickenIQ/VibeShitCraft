@@ -611,6 +611,9 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, s
 	const hallHeight = 4
 	const towerHeight = 10 // Solid part ends here
 
+	// Raise the whole church one block so it sits on the surface instead of sunk.
+	surfY++
+
 	// 1. Tower Construction
 	for dx := 0; dx <= towerMaxX; dx++ {
 		for dz := 0; dz <= towerMaxZ; dz++ {
@@ -622,7 +625,12 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, s
 				if dy == -1 {
 					place(hx+dx, surfY+dy, hz+dz, cobble) // Hidden Foundation
 				} else if dy == 0 {
-					place(hx+dx, surfY+dy, hz+dz, cobble) // Solid Floor at ground level
+					// Place floor, but let corner logs extend down to touch the ground.
+					if isCorner {
+						place(hx+dx, surfY+dy, hz+dz, log)
+					} else {
+						place(hx+dx, surfY+dy, hz+dz, cobble) // Solid Floor at ground level
+					}
 				} else if dy == towerHeight {
 					place(hx+dx, surfY+dy, hz+dz, cobble) // Belfry Floor
 				} else {
@@ -653,9 +661,9 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, s
 							// Door and Cross at front
 							if dz == 0 {
 								if dx == 2 {
-									if dy == 0 {
+									if dy == 1 {
 										block = door | 3
-									} else if dy == 1 {
+									} else if dy == 2 {
 										block = door | 8
 									} else if dy >= 4 && dy <= 6 {
 										block = glass
@@ -690,8 +698,13 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, s
 	}
 
 	// 2. Hanging Bell
+	place(hx+2, surfY+towerHeight+5, hz+2, 85<<4) // Extra fence to attach to roof
 	place(hx+2, surfY+towerHeight+4, hz+2, 85<<4) // Fence hanging from belfry roof center
 	place(hx+2, surfY+towerHeight+3, hz+2, bell)  // The Gold Bell
+
+	// Cobblestone stair in front of door so entrance is accessible.
+	cobbleStairs := uint16(67 << 4) // stone/cobblestone stairs
+	place(hx+2, surfY, hz-1, cobbleStairs|2)
 
 	// 3. Hall Construction
 	for dx := 0; dx <= hallMaxX; dx++ {
@@ -704,7 +717,13 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, s
 				if dy == -1 {
 					place(hx+dx, surfY+dy, hz+dz, cobble) // Hidden Foundation
 				} else if dy == 0 {
-					place(hx+dx, surfY+dy, hz+dz, cobble) // Solid Floor
+					// Place floor; allow back-corner logs to start at floor level so they
+					// touch the ground instead of floating.
+					if isCorner {
+						place(hx+dx, surfY+dy, hz+dz, log)
+					} else {
+						place(hx+dx, surfY+dy, hz+dz, cobble) // Solid Floor
+					}
 				} else if isCorner {
 					place(hx+dx, surfY+dy, hz+dz, log) // Back corners
 				} else if isWallX || isWallZ {
@@ -735,6 +754,19 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, s
 	}
 
 	// 5. Hall Gables and Roof
+	// Helper to avoid placing roof blocks where the hall roof would intrude
+	// into the tower footprint at dz==4 (overlap column). If a roof block
+	// would land inside the tower (tz == hz+4 and tx in [hx, hx+towerMaxX])
+	// skip it.
+	placeRoof := func(tx, y, tz int, state uint16) {
+		if tz == hz+4 {
+			if tx >= hx && tx <= hx+towerMaxX {
+				return
+			}
+		}
+		place(tx, y, tz, state)
+	}
+
 	for dz := 4; dz <= hallMaxZ; dz++ {
 		// Back Gable (dz=10)
 		if dz == hallMaxZ {
@@ -745,24 +777,24 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, s
 		}
 
 		// Slopes
-		place(hx-1, surfY+hallHeight+1, hz+dz, stairs|0)
-		place(hx+hallMaxX+1, surfY+hallHeight+1, hz+dz, stairs|1)
+		placeRoof(hx-1, surfY+hallHeight+1, hz+dz, stairs|0)
+		placeRoof(hx+hallMaxX+1, surfY+hallHeight+1, hz+dz, stairs|1)
 
-		place(hx, surfY+hallHeight+1, hz+dz, cobble)
-		place(hx, surfY+hallHeight+2, hz+dz, stairs|0)
+		placeRoof(hx, surfY+hallHeight+1, hz+dz, cobble)
+		placeRoof(hx, surfY+hallHeight+2, hz+dz, stairs|0)
 
-		place(hx+hallMaxX, surfY+hallHeight+1, hz+dz, cobble)
-		place(hx+hallMaxX, surfY+hallHeight+2, hz+dz, stairs|1)
+		placeRoof(hx+hallMaxX, surfY+hallHeight+1, hz+dz, cobble)
+		placeRoof(hx+hallMaxX, surfY+hallHeight+2, hz+dz, stairs|1)
 
-		place(hx+1, surfY+hallHeight+2, hz+dz, cobble)
-		place(hx+1, surfY+hallHeight+3, hz+dz, stairs|0)
+		placeRoof(hx+1, surfY+hallHeight+2, hz+dz, cobble)
+		placeRoof(hx+1, surfY+hallHeight+3, hz+dz, stairs|0)
 
-		place(hx+hallMaxX-1, surfY+hallHeight+2, hz+dz, cobble)
-		place(hx+hallMaxX-1, surfY+hallHeight+3, hz+dz, stairs|1)
+		placeRoof(hx+hallMaxX-1, surfY+hallHeight+2, hz+dz, cobble)
+		placeRoof(hx+hallMaxX-1, surfY+hallHeight+3, hz+dz, stairs|1)
 
-		// Ridge - Extends into the tower wall
-		place(hx+2, surfY+hallHeight+3, hz+dz, cobble)
-		place(hx+2, surfY+hallHeight+4, hz+dz, slab)
+		// Ridge - Extends into the tower wall (skip overlap)
+		placeRoof(hx+2, surfY+hallHeight+3, hz+dz, cobble)
+		placeRoof(hx+2, surfY+hallHeight+4, hz+dz, slab)
 	}
 
 	// 6. Interior Furniture
