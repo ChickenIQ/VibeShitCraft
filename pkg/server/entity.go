@@ -47,14 +47,35 @@ func (s *Server) entityPhysicsLoop() {
 	}
 }
 
+// checkEntityCollision checks if the given AABB intersects with any solid blocks
+func (s *Server) checkEntityCollision(x, y, z, width, height float64) bool {
+	minX := int32(math.Floor(x - width/2))
+	maxX := int32(math.Floor(x + width/2))
+	minY := int32(math.Floor(y))
+	maxY := int32(math.Floor(y + height))
+	minZ := int32(math.Floor(z - width/2))
+	maxZ := int32(math.Floor(z + width/2))
+
+	for bx := minX; bx <= maxX; bx++ {
+		for by := minY; by <= maxY; by++ {
+			for bz := minZ; bz <= maxZ; bz++ {
+				block := s.world.GetBlock(bx, by, bz)
+				if block>>4 != 0 {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 func (s *Server) tickEntityPhysics() {
 	const gravity = 0.04
 	const drag = 0.98
-	const groundDrag = 0.5
+	const groundDrag = 0.58 // 0.98 * 0.6 (slipperiness) approx 0.58
 
 	s.mu.Lock()
 
-	// Collect entities that moved so we can broadcast after releasing the lock
 	type movedItem struct {
 		entityID int32
 		x, y, z  float64
@@ -62,54 +83,65 @@ func (s *Server) tickEntityPhysics() {
 	var movedItems []movedItem
 
 	for _, item := range s.entities {
-		if item.VX == 0 && item.VY == 0 && item.VZ == 0 {
-			// Check if entity is supported by ground
-			blockBelow := s.world.GetBlock(int32(math.Floor(item.X)), int32(math.Floor(item.Y-0.1)), int32(math.Floor(item.Z)))
-			if blockBelow>>4 != 0 {
-				continue
-			}
-			// Not on ground and no velocity - start falling
-		}
+		const itemWidth = 0.25
+		const itemHeight = 0.25
 
-		// Apply gravity
 		item.VY -= gravity
 
-		// Apply drag
-		item.VX *= drag
-		item.VY *= drag
-		item.VZ *= drag
+		// X movement
+		if !s.checkEntityCollision(item.X+item.VX, item.Y, item.Z, itemWidth, itemHeight) {
+			item.X += item.VX
+		} else {
+			item.VX = 0
+		}
 
-		// Calculate new position
-		newX := item.X + item.VX
-		newY := item.Y + item.VY
-		newZ := item.Z + item.VZ
-
-		// Ground collision check
-		blockAtNew := s.world.GetBlock(int32(math.Floor(newX)), int32(math.Floor(newY)), int32(math.Floor(newZ)))
-		if blockAtNew>>4 != 0 {
-			// Hit solid block - place on top
-			newY = math.Floor(newY) + 1.0
-			item.VY = 0
-			item.VX *= groundDrag
-			item.VZ *= groundDrag
-
-			// Stop tiny velocities
-			if math.Abs(item.VX) < 0.001 {
-				item.VX = 0
+		// Y movement
+		onGround := false
+		if !s.checkEntityCollision(item.X, item.Y+item.VY, item.Z, itemWidth, itemHeight) {
+			item.Y += item.VY
+		} else {
+			if item.VY < 0 {
+				onGround = true
 			}
-			if math.Abs(item.VZ) < 0.001 {
-				item.VZ = 0
+			item.VY *= -0.5 // Bounce
+			if math.Abs(item.VY) < 0.1 {
+				item.VY = 0 // Stop micro-bounces
+				// When resting on the ground, snap to block boundary to prevent hovering
+				if onGround {
+					item.Y = math.Floor(item.Y)
+				}
 			}
 		}
 
-		item.X = newX
-		item.Y = newY
-		item.Z = newZ
+		// Z movement
+		if !s.checkEntityCollision(item.X, item.Y, item.Z+item.VZ, itemWidth, itemHeight) {
+			item.Z += item.VZ
+		} else {
+			item.VZ = 0
+		}
+
+		// Friction & Drag
+		f := drag
+		if onGround {
+			f = groundDrag
+		}
+		item.VX *= f
+		item.VY *= drag
+		item.VZ *= f
+
+		if math.Abs(item.VX) < 0.001 {
+			item.VX = 0
+		}
+		if math.Abs(item.VY) < 0.001 {
+			item.VY = 0
+		}
+		if math.Abs(item.VZ) < 0.001 {
+			item.VZ = 0
+		}
 
 		movedItems = append(movedItems, movedItem{item.EntityID, item.X, item.Y, item.Z})
 	}
 
-	// Tick mob entities: gravity, physics, and optional AI
 	type movedMob struct {
 		entityID   int32
 		x, y, z    float64
@@ -119,61 +151,64 @@ func (s *Server) tickEntityPhysics() {
 	var movedMobs []movedMob
 
 	for _, mob := range s.mobEntities {
-		// Run AI if present
+		const mobWidth = 0.6
+		const mobHeight = 1.8
+
 		if mob.AIFunc != nil {
 			mob.AIFunc(mob, s)
 		}
 
-		if mob.VX == 0 && mob.VY == 0 && mob.VZ == 0 {
-			blockBelow := s.world.GetBlock(int32(math.Floor(mob.X)), int32(math.Floor(mob.Y-0.1)), int32(math.Floor(mob.Z)))
-			if blockBelow>>4 != 0 {
-				mob.OnGround = true
-				continue
-			}
-			mob.OnGround = false
-		}
-
-		// Apply gravity
 		mob.VY -= gravity
 
-		// Apply drag
-		mob.VX *= drag
-		mob.VY *= drag
-		mob.VZ *= drag
-
-		newX := mob.X + mob.VX
-		newY := mob.Y + mob.VY
-		newZ := mob.Z + mob.VZ
-
-		// Ground collision
-		blockAtNew := s.world.GetBlock(int32(math.Floor(newX)), int32(math.Floor(newY)), int32(math.Floor(newZ)))
-		if blockAtNew>>4 != 0 {
-			newY = math.Floor(newY) + 1.0
-			mob.VY = 0
-			mob.VX *= groundDrag
-			mob.VZ *= groundDrag
-			mob.OnGround = true
-
-			if math.Abs(mob.VX) < 0.001 {
-				mob.VX = 0
-			}
-			if math.Abs(mob.VZ) < 0.001 {
-				mob.VZ = 0
-			}
+		// X
+		if !s.checkEntityCollision(mob.X+mob.VX, mob.Y, mob.Z, mobWidth, mobHeight) {
+			mob.X += mob.VX
 		} else {
-			mob.OnGround = false
+			mob.VX = 0
 		}
 
-		mob.X = newX
-		mob.Y = newY
-		mob.Z = newZ
+		// Y
+		mob.OnGround = false
+		if !s.checkEntityCollision(mob.X, mob.Y+mob.VY, mob.Z, mobWidth, mobHeight) {
+			mob.Y += mob.VY
+		} else {
+			if mob.VY < 0 {
+				mob.OnGround = true
+				mob.Y = math.Floor(mob.Y)
+			}
+			mob.VY = 0
+		}
+
+		// Z
+		if !s.checkEntityCollision(mob.X, mob.Y, mob.Z+mob.VZ, mobWidth, mobHeight) {
+			mob.Z += mob.VZ
+		} else {
+			mob.VZ = 0
+		}
+
+		f := drag
+		if mob.OnGround {
+			f = groundDrag
+		}
+		mob.VX *= f
+		mob.VY *= drag
+		mob.VZ *= f
+
+		if math.Abs(mob.VX) < 0.001 {
+			mob.VX = 0
+		}
+		if math.Abs(mob.VY) < 0.001 {
+			mob.VY = 0
+		}
+		if math.Abs(mob.VZ) < 0.001 {
+			mob.VZ = 0
+		}
 
 		movedMobs = append(movedMobs, movedMob{mob.EntityID, mob.X, mob.Y, mob.Z, mob.Yaw, mob.Pitch, mob.OnGround})
 	}
 
 	s.mu.Unlock()
 
-	// Broadcast entity teleport packets
 	for _, m := range movedItems {
 		s.broadcastEntityTeleportByID(m.entityID, m.x, m.y, m.z, 0, 0, true)
 	}

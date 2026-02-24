@@ -377,3 +377,77 @@ func TestMobEntityAIHook(t *testing.T) {
 		t.Error("AI function was not called during physics tick")
 	}
 }
+
+func TestEntityPhysics(t *testing.T) {
+	s := New(DefaultConfig())
+
+	// Create a hollow enclosed room from x=0..6, y=0..6, z=0..6
+	// The open space is x=1..5, y=1..5, z=1..5
+	for x := int32(0); x <= 6; x++ {
+		for y := int32(0); y <= 6; y++ {
+			for z := int32(0); z <= 6; z++ {
+				if x == 0 || x == 6 || y == 0 || y == 6 || z == 0 || z == 6 {
+					s.world.SetBlock(x, y, z, 1<<4) // stone
+				}
+			}
+		}
+	}
+
+	// 1. Wall Collision (X-axis)
+	s.mu.Lock()
+	eid1 := s.nextEID
+	s.nextEID++
+	s.entities[eid1] = &ItemEntity{
+		EntityID: eid1,
+		ItemID:   4,
+		X:        2.0,
+		Y:        2.0,
+		Z:        2.0,
+		VX:       5.0, // High velocity into the x=6 wall
+		VY:       0,
+		VZ:       0,
+	}
+
+	// 2. Floor Bouncing (Y-axis)
+	eid2 := s.nextEID
+	s.nextEID++
+	s.entities[eid2] = &ItemEntity{
+		EntityID: eid2,
+		ItemID:   4,
+		X:        4.0,
+		Y:        4.0, // Dropped from high up
+		Z:        4.0,
+		VX:       0,
+		VY:       0,
+		VZ:       0,
+	}
+	s.mu.Unlock()
+
+	// Tick several times to let the first item hit the wall and the second hit the floor
+	for i := 0; i < 20; i++ {
+		s.tickEntityPhysics()
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	item1 := s.entities[eid1]
+	item2 := s.entities[eid2]
+
+	// Check Wall Collision
+	// The wall is at X=6. The item has width 0.25, so its edge is at X+0.125.
+	// It should stop before entering the block.
+	if item1.X >= 5.875 {
+		t.Errorf("item1 failed wall collision, expected X < 5.875, got %f", item1.X)
+	}
+	if item1.VX != 0 {
+		t.Errorf("item1 velocity not halted by wall, got VX %f", item1.VX)
+	}
+
+	// Check Floor Bouncing
+	// The floor is at Y=0. The item Y should be above 1.0.
+	// We expect the item to have bounced a bit or settled around Y=1.0.
+	if item2.Y < 1.0 {
+		t.Errorf("item2 fell through the floor, expected Y >= 1.0, got %f", item2.Y)
+	}
+}
