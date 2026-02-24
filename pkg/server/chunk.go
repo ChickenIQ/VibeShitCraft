@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"net"
 
 	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
 )
@@ -100,16 +99,5 @@ func (s *Server) sendChunkUpdates(player *Player) {
 		player.mu.Lock()
 		protocol.WritePacket(player.Conn, pkt)
 		player.mu.Unlock()
-	}
-}
-
-func (s *Server) sendBlockModifications(conn net.Conn) {
-	modifications := s.world.GetModifications()
-	for pos, blockState := range modifications {
-		pkt := protocol.MarshalPacket(0x23, func(w *bytes.Buffer) {
-			protocol.WritePosition(w, pos.X, pos.Y, pos.Z)
-			protocol.WriteVarInt(w, int32(blockState))
-		})
-		protocol.WritePacket(conn, pkt)
 	}
 }

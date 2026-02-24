@@ -1,6 +1,9 @@
 package world
 
-import "sync"
+import (
+	"math/rand"
+	"sync"
+)
 
 // BlockPos represents a block position in the world.
 type BlockPos struct {
@@ -252,7 +255,10 @@ func BlockToItemID(blockState uint16) (int16, int16, byte) {
 	case 17, 162: // logs -> drop themselves, strip rotation/orientation
 		// Log metadata: lowest 2 bits are wood type, next 2 are orientation
 		return int16(blockID), metadata & 0x03, 1
-	case 18, 161: // leaves -> chance to drop saplings, but for now drop nothing
+	case 18, 161: // leaves -> chance to drop saplings
+		if rand.Float32() < 0.05 {
+			return 6, metadata & 0x03, 1
+		}
 		return -1, 0, 0
 	case 31: // tall grass -> drops nothing (unless shears)
 		return -1, 0, 0
@@ -261,6 +267,28 @@ func BlockToItemID(blockState uint16) (int16, int16, byte) {
 			return 296, 0, 1 // Wheat item
 		}
 		return 295, 0, 1 // Wheat seeds
+	case 141: // carrots
+		if metadata == 7 {
+			return 391, 0, byte(2 + rand.Intn(3)) // 2-4 carrots
+		}
+		return 391, 0, 1
+	case 142: // potatoes
+		if metadata == 7 {
+			return 392, 0, byte(2 + rand.Intn(3)) // 2-4 potatoes
+		}
+		return 392, 0, 1
+	case 83: // sugar cane
+		return 338, 0, 1
+	case 81: // cactus
+		return 81, 0, 1
+	case 104: // pumpkin stem
+		return 361, 0, 1
+	case 105: // melon stem
+		return 362, 0, 1
+	case 103: // melon block
+		return 360, 0, byte(3 + rand.Intn(5)) // 3-7 slices
+	case 86: // pumpkin block
+		return 86, 0, 1
 	case 60: // farmland -> drops dirt
 		return 3, 0, 1
 	case 64, 71, 193, 194, 195, 196, 197: // Doors

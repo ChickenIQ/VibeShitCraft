@@ -136,25 +136,31 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 
 	// Block IDs (state = id << 4)
 	const (
-		air        = 0
-		log        = 17 << 4  // oak log
-		cobble     = 4 << 4   // cobblestone
-		planks     = 5 << 4   // oak planks
-		gravel     = 13 << 4  // gravel (path)
-		glass      = 20 << 4  // glass pane (window)
-		fence      = 85 << 4  // oak fence
-		stoneBrick = 98 << 4  // stone bricks (well walls)
-		cobbleWall = 139 << 4 // cobblestone wall
-		waterSrc   = 9 << 4   // water (stationary)
-		torch      = 50 << 4  // torch
-		slab       = 44 << 4  // stone slab
-		oakStairs  = 53 << 4  // oak stairs
-		woodenDoor = 64 << 4  // wooden door
-		farmland   = 60 << 4  // farmland
-		wheat      = 59 << 4  // wheat (id 59)
-		dandelion  = 37 << 4  // dandelion flower
-		poppy      = 38 << 4  // poppy flower
-		goldBlock  = 41 << 4  // gold block (bell)
+		air          = 0
+		log          = 17 << 4  // oak log
+		cobble       = 4 << 4   // cobblestone
+		planks       = 5 << 4   // oak planks
+		gravel       = 13 << 4  // gravel (path)
+		glass        = 20 << 4  // glass pane (window)
+		fence        = 85 << 4  // oak fence
+		stoneBrick   = 98 << 4  // stone bricks (well walls)
+		cobbleWall   = 139 << 4 // cobblestone wall
+		waterSrc     = 9 << 4   // water (stationary)
+		torch        = 50 << 4  // torch
+		slab         = 44 << 4  // stone slab
+		oakStairs    = 53 << 4  // oak stairs
+		woodenDoor   = 64 << 4  // wooden door
+		farmland     = 60 << 4  // farmland
+		wheat        = 59 << 4  // wheat
+		carrot       = 141 << 4 // carrot
+		potato       = 142 << 4 // potato
+		melonStem    = 105 << 4 // melon stem
+		pumpkinStem  = 104 << 4 // pumpkin stem
+		melonBlock   = 103 << 4 // melon block
+		pumpkinBlock = 86 << 4  // pumpkin block
+		dandelion    = 37 << 4  // dandelion flower
+		poppy        = 38 << 4  // poppy flower
+		goldBlock    = 41 << 4  // gold block (bell)
 	)
 
 	placeBlock := func(wx, y, wz int, state uint16) {
@@ -260,8 +266,37 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 	v.buildHouse(vx+22, vz-12, surfY, 2, placeBlock, log, planks, cobble, glass, fence, torch, oakStairs, woodenDoor, air)
 
 	// Farms
-	v.buildFarm(vx-22, vz+12, surfY, placeBlock, log, waterSrc, farmland, wheat)
-	v.buildFarm(vx+6, vz-22, surfY, placeBlock, log, waterSrc, farmland, wheat)
+	// Potential farm locations (avoiding main buildings)
+	farmLocations := []struct{ dx, dz int }{
+		{-22, 12}, // West branch area
+		{6, -22},  // South-ish branch area
+		{22, 12},  // East branch area
+		{-6, -30}, // Far South branch area
+	}
+
+	// Deterministically decide how many farms to build (1 to 4)
+	numFarms := int(v.cellHash(int64(vx), int64(vz), 4)) + 1
+
+	// Shuffle locations deterministically for variety in placement
+	for i := len(farmLocations) - 1; i > 0; i-- {
+		j := int(v.cellHash(int64(vx+i), int64(vz-i), int64(i+1)))
+		farmLocations[i], farmLocations[j] = farmLocations[j], farmLocations[i]
+	}
+
+	for i := 0; i < numFarms; i++ {
+		fx, fz := vx+farmLocations[i].dx, vz+farmLocations[i].dz
+		farmHash := v.cellHash(int64(fx), int64(fz), 10)
+
+		if farmHash < 7 { // 70% chance for standard crop farm
+			crops := []uint16{wheat, carrot, potato}
+			v.buildFarm(fx, fz, surfY, placeBlock, log, waterSrc, farmland, crops[farmHash%3])
+		} else { // 30% chance for fruit farm
+			fruits := []uint16{melonBlock, pumpkinBlock}
+			stems := []uint16{melonStem, pumpkinStem}
+			idx := int(farmHash % 2)
+			v.buildFruitFarm(fx, fz, surfY, placeBlock, log, waterSrc, farmland, stems[idx], fruits[idx])
+		}
+	}
 
 	// Church (at West)
 	v.buildChurch(vx-18, vz-18, surfY, placeBlock, log, planks, cobble, glass, torch, oakStairs, woodenDoor, slab, air, goldBlock)
@@ -298,7 +333,7 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 }
 
 // buildFarm creates a 7x7 farm with a water trench in the middle.
-func (v *VillageGrid) buildFarm(fx, fz, surfY int, place func(wx, y, wz int, state uint16), log, water, farmland, wheat uint16) {
+func (v *VillageGrid) buildFarm(fx, fz, surfY int, place func(wx, y, wz int, state uint16), log, water, farmland, crop uint16) {
 	for dx := -3; dx <= 3; dx++ {
 		for dz := -3; dz <= 3; dz++ {
 			isBorder := dx == -3 || dx == 3 || dz == -3 || dz == 3
@@ -308,7 +343,33 @@ func (v *VillageGrid) buildFarm(fx, fz, surfY int, place func(wx, y, wz int, sta
 				place(fx+dx, surfY, fz+dz, water)
 			} else {
 				place(fx+dx, surfY, fz+dz, farmland)
-				place(fx+dx, surfY+1, fz+dz, wheat|7) // fully grown wheat (meta 7)
+				place(fx+dx, surfY+1, fz+dz, crop|7) // fully grown (meta 7)
+			}
+		}
+	}
+}
+
+// buildFruitFarm creates a 7x7 farm designed for melons or pumpkins.
+func (v *VillageGrid) buildFruitFarm(fx, fz, surfY int, place func(wx, y, wz int, state uint16), log, water, farmland, stem, fruit uint16) {
+	for dx := -3; dx <= 3; dx++ {
+		for dz := -3; dz <= 3; dz++ {
+			isBorder := dx == -3 || dx == 3 || dz == -3 || dz == 3
+			if isBorder {
+				place(fx+dx, surfY, fz+dz, log)
+			} else if dx == 0 {
+				place(fx+dx, surfY, fz+dz, water)
+			} else if dx == -1 || dx == 1 {
+				// Farmland for stems
+				place(fx+dx, surfY, fz+dz, farmland)
+				place(fx+dx, surfY+1, fz+dz, stem|7) // fully grown stem
+			} else {
+				// Dirt-like foundation for fruit to spawn on
+				// In villages, this is usually grass or dirt. We'll use grass.
+				place(fx+dx, surfY, fz+dz, 2<<4) // grass
+				// Randomly place a few fruits already
+				if (dx+dz)%3 == 0 {
+					place(fx+dx, surfY+1, fz+dz, fruit)
+				}
 			}
 		}
 	}

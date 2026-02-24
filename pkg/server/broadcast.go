@@ -43,11 +43,13 @@ func (s *Server) broadcastBlockChange(x, y, z int32, blockState uint16) {
 		protocol.WriteVarInt(w, int32(blockState))
 	})
 
+	pos := ChunkPos{x >> 4, z >> 4}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, p := range s.players {
 		p.mu.Lock()
-		if p.Conn != nil {
+		if p.Conn != nil && p.loadedChunks[pos] {
 			protocol.WritePacket(p.Conn, pkt)
 		}
 		p.mu.Unlock()
@@ -57,6 +59,14 @@ func (s *Server) broadcastBlockChange(x, y, z int32, blockState uint16) {
 func (s *Server) broadcastBlockBreakEffect(breaker *Player, x, y, z int32, blockState uint16) {
 	blockID := blockState >> 4
 	metadata := blockState & 0x0F
+
+	// Wheat crops (59) with metadata > 0 can cause weird particle colors (like emerald blocks)
+	// when broken by other players, due to how the 1.8 client handles Effect 2001.
+	// To fix this, we strip the metadata for crops.
+	if blockID == 59 {
+		metadata = 0
+	}
+
 	effectData := int32(blockID) | (int32(metadata) << 12)
 
 	pkt := protocol.MarshalPacket(0x28, func(w *bytes.Buffer) {
@@ -66,6 +76,8 @@ func (s *Server) broadcastBlockBreakEffect(breaker *Player, x, y, z int32, block
 		protocol.WriteBool(w, false) // Disable relative volume
 	})
 
+	pos := ChunkPos{x >> 4, z >> 4}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, p := range s.players {
@@ -73,7 +85,7 @@ func (s *Server) broadcastBlockBreakEffect(breaker *Player, x, y, z int32, block
 			continue // Breaking player already sees the effect client-side
 		}
 		p.mu.Lock()
-		if p.Conn != nil {
+		if p.Conn != nil && p.loadedChunks[pos] {
 			protocol.WritePacket(p.Conn, pkt)
 		}
 		p.mu.Unlock()

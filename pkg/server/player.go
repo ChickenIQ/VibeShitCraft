@@ -149,9 +149,6 @@ func (s *Server) handlePlay(player *Player) {
 	// Send chunks around player
 	s.sendSpawnChunks(player)
 
-	// Send any block modifications to the new player
-	s.sendBlockModifications(conn)
-
 	// Register player
 	s.mu.Lock()
 	s.players[player.EntityID] = player
