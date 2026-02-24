@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/chat"
-	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
+	"github.com/VibeShit/VibeShitCraft/pkg/chat"
+	"github.com/VibeShit/VibeShitCraft/pkg/protocol"
 )
 
 // handleCommand dispatches a /-prefixed command from a player.

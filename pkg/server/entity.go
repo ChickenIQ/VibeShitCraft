@@ -6,7 +6,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
+	"github.com/VibeShit/VibeShitCraft/pkg/protocol"
 )
 
 // ItemEntity represents an item dropped on the ground.

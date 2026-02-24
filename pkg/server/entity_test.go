@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
+	"github.com/VibeShit/VibeShitCraft/pkg/protocol"
 )
 
 func TestSpawnMob(t *testing.T) {

@@ -5,8 +5,8 @@ import (
 	"log"
 	"math"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/chat"
-	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
+	"github.com/VibeShit/VibeShitCraft/pkg/chat"
+	"github.com/VibeShit/VibeShitCraft/pkg/protocol"
 )
 
 func (s *Server) handleAttack(attacker *Player, targetID int32) {

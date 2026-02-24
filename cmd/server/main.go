@@ -7,7 +7,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/server"
+	"github.com/VibeShit/VibeShitCraft/pkg/server"
 )
 
 func main() {

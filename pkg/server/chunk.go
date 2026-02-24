@@ -3,7 +3,7 @@ package server
 import (
 	"bytes"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
+	"github.com/VibeShit/VibeShitCraft/pkg/protocol"
 )
 
 func (s *Server) sendSpawnChunks(player *Player) {
