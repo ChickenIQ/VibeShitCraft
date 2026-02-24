@@ -60,13 +60,54 @@ func (s *Server) checkEntityCollision(x, y, z, width, height float64) bool {
 		for by := minY; by <= maxY; by++ {
 			for bz := minZ; bz <= maxZ; bz++ {
 				block := s.world.GetBlock(bx, by, bz)
-				if block>>4 != 0 {
+				if isSolidBlock(block >> 4) {
 					return true
 				}
 			}
 		}
 	}
 	return false
+}
+
+// isSolidBlock returns true if the block ID represents a physical solid block.
+func isSolidBlock(blockID uint16) bool {
+	switch blockID {
+	case 0: // Air
+		return false
+	case 8, 9: // Water
+		return false
+	case 10, 11: // Lava
+		return false
+	case 30: // Cobweb
+		return false
+	case 31, 32: // Tall grass, Dead bush
+		return false
+	case 37, 38, 39, 40, 175: // Flowers and mushrooms
+		return false
+	case 50, 75, 76: // Torches
+		return false
+	case 51: // Fire
+		return false
+	case 55: // Redstone wire
+		return false
+	case 59, 83, 104, 105, 115, 141, 142: // Crops/plants
+		return false
+	case 63, 68: // Signs
+		return false
+	case 65: // Ladder
+		return false
+	case 69, 77, 143: // Lever, buttons
+		return false
+	case 27, 28, 66, 157: // Rails
+		return false
+	case 70, 72, 147, 148: // Pressure plates
+		return false
+	case 106: // Vines
+		return false
+	case 171: // Carpet
+		return false
+	}
+	return true
 }
 
 func (s *Server) tickEntityPhysics() {
@@ -77,8 +118,9 @@ func (s *Server) tickEntityPhysics() {
 	s.mu.Lock()
 
 	type movedItem struct {
-		entityID int32
-		x, y, z  float64
+		entityID   int32
+		x, y, z    float64
+		vx, vy, vz float64
 	}
 	var movedItems []movedItem
 
@@ -86,41 +128,67 @@ func (s *Server) tickEntityPhysics() {
 		const itemWidth = 0.25
 		const itemHeight = 0.25
 
-		item.VY -= gravity
+		blockAtCenter := s.world.GetBlock(int32(math.Floor(item.X)), int32(math.Floor(item.Y)), int32(math.Floor(item.Z)))
+		centerID := blockAtCenter >> 4
+		inWater := centerID == 8 || centerID == 9
+		inLava := centerID == 10 || centerID == 11
 
-		// X movement
+		// Apply fluid buoyancy and specialized drag, else apply standard gravity
+		if inWater || inLava {
+			item.VY -= gravity * 0.5 // Reduce gravity effect
+			item.VX *= 0.5           // Extra horizontal drag from liquid
+			item.VZ *= 0.5
+
+			// Cap downward velocity in liquids
+			if item.VY < -0.1 {
+				item.VY = -0.1
+			}
+			// Slight float if entirely submerged (this requires checking head-level but simple approximation is VY cap)
+		} else {
+			item.VY -= gravity
+		}
+
+		// X movement: Attempt to move on X axis. If collision occurs, halt X velocity.
 		if !s.checkEntityCollision(item.X+item.VX, item.Y, item.Z, itemWidth, itemHeight) {
 			item.X += item.VX
 		} else {
 			item.VX = 0
 		}
 
-		// Y movement
+		// Y movement: Attempt to move on Y axis.
 		onGround := false
 		if !s.checkEntityCollision(item.X, item.Y+item.VY, item.Z, itemWidth, itemHeight) {
 			item.Y += item.VY
 		} else {
+			// Collision on Y axis. If falling (VY < 0), we hit the ground.
 			if item.VY < 0 {
 				onGround = true
 			}
-			item.VY *= -0.5 // Bounce
-			if math.Abs(item.VY) < 0.1 {
-				item.VY = 0 // Stop micro-bounces
-				// When resting on the ground, snap to block boundary to prevent hovering
-				if onGround {
+
+			// Simulate item bounce, but NOT if we are in water/lava
+			if inWater || inLava {
+				item.VY = 0
+			} else {
+				item.VY *= -0.5 // Bounce multiplier
+				if math.Abs(item.VY) < 0.1 {
+					item.VY = 0 // Stop micro-bounces once energy is low enough
+				}
+				// When resting on solid ground (not liquid), snap the item to the exact block boundary
+				// to prevent it from visually hovering or clipping into the floor
+				if onGround && item.VY == 0 {
 					item.Y = math.Floor(item.Y)
 				}
 			}
 		}
 
-		// Z movement
+		// Z movement: Attempt to move on Z axis. If collision occurs, halt Z velocity.
 		if !s.checkEntityCollision(item.X, item.Y, item.Z+item.VZ, itemWidth, itemHeight) {
 			item.Z += item.VZ
 		} else {
 			item.VZ = 0
 		}
 
-		// Friction & Drag
+		// Apply friction & drag depending on if item is on the ground
 		f := drag
 		if onGround {
 			f = groundDrag
@@ -129,6 +197,7 @@ func (s *Server) tickEntityPhysics() {
 		item.VY *= drag
 		item.VZ *= f
 
+		// Zero out tiny velocities to prevent endless micro-movement computations
 		if math.Abs(item.VX) < 0.001 {
 			item.VX = 0
 		}
@@ -139,12 +208,13 @@ func (s *Server) tickEntityPhysics() {
 			item.VZ = 0
 		}
 
-		movedItems = append(movedItems, movedItem{item.EntityID, item.X, item.Y, item.Z})
+		movedItems = append(movedItems, movedItem{item.EntityID, item.X, item.Y, item.Z, item.VX, item.VY, item.VZ})
 	}
 
 	type movedMob struct {
 		entityID   int32
 		x, y, z    float64
+		vx, vy, vz float64
 		yaw, pitch float32
 		onGround   bool
 	}
@@ -158,7 +228,19 @@ func (s *Server) tickEntityPhysics() {
 			mob.AIFunc(mob, s)
 		}
 
-		mob.VY -= gravity
+		blockAtMob := s.world.GetBlock(int32(math.Floor(mob.X)), int32(math.Floor(mob.Y)), int32(math.Floor(mob.Z)))
+		mobCenterID := blockAtMob >> 4
+		mobInWater := mobCenterID == 8 || mobCenterID == 9
+		mobInLava := mobCenterID == 10 || mobCenterID == 11
+
+		if mobInWater || mobInLava {
+			mob.VY += 0.05
+			mob.VX *= 0.8
+			mob.VY *= 0.8
+			mob.VZ *= 0.8
+		} else {
+			mob.VY -= gravity
+		}
 
 		// X
 		if !s.checkEntityCollision(mob.X+mob.VX, mob.Y, mob.Z, mobWidth, mobHeight) {
@@ -174,9 +256,15 @@ func (s *Server) tickEntityPhysics() {
 		} else {
 			if mob.VY < 0 {
 				mob.OnGround = true
-				mob.Y = math.Floor(mob.Y)
+				if !mobInWater && !mobInLava {
+					mob.Y = math.Floor(mob.Y)
+				}
 			}
-			mob.VY = 0
+			if mobInWater || mobInLava {
+				mob.VY = 0
+			} else {
+				mob.VY = 0
+			}
 		}
 
 		// Z
@@ -204,16 +292,18 @@ func (s *Server) tickEntityPhysics() {
 			mob.VZ = 0
 		}
 
-		movedMobs = append(movedMobs, movedMob{mob.EntityID, mob.X, mob.Y, mob.Z, mob.Yaw, mob.Pitch, mob.OnGround})
+		movedMobs = append(movedMobs, movedMob{mob.EntityID, mob.X, mob.Y, mob.Z, mob.VX, mob.VY, mob.VZ, mob.Yaw, mob.Pitch, mob.OnGround})
 	}
 
 	s.mu.Unlock()
 
 	for _, m := range movedItems {
 		s.broadcastEntityTeleportByID(m.entityID, m.x, m.y, m.z, 0, 0, true)
+		s.broadcastEntityVelocity(m.entityID, m.vx, m.vy, m.vz)
 	}
 	for _, m := range movedMobs {
 		s.broadcastEntityTeleportByID(m.entityID, m.x, m.y, m.z, m.yaw, m.pitch, m.onGround)
+		s.broadcastEntityVelocity(m.entityID, m.vx, m.vy, m.vz)
 	}
 }
 

@@ -102,6 +102,25 @@ func (s *Server) broadcastEntityTeleportByID(entityID int32, x, y, z float64, ya
 	}
 }
 
+func (s *Server) broadcastEntityVelocity(entityID int32, vx, vy, vz float64) {
+	pkt := protocol.MarshalPacket(0x12, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, entityID)
+		protocol.WriteInt16(w, int16(vx*8000))
+		protocol.WriteInt16(w, int16(vy*8000))
+		protocol.WriteInt16(w, int16(vz*8000))
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		p.mu.Lock()
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
+		p.mu.Unlock()
+	}
+}
+
 func (s *Server) broadcastEntityTeleport(player *Player) {
 	player.mu.Lock()
 	x := player.X
