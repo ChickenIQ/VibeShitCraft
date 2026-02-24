@@ -130,6 +130,16 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 			s.switchGameMode(player, GameModeCreative)
 		}
 
+	case 0x14: // Tab-Complete
+		text, err := protocol.ReadString(r)
+		if err != nil {
+			return
+		}
+		// We only support autocomplete for commands.
+		if strings.HasPrefix(text, "/") {
+			s.handleTabComplete(player, text)
+		}
+
 	case 0x17: // Plugin Message
 	// Ignore for now
 

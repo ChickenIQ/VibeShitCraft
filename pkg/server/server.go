@@ -53,6 +53,7 @@ type Server struct {
 	stopCh      chan struct{}
 	stopOnce    sync.Once
 	world       *world.World
+	gamerules   map[string]string
 }
 
 // New creates a new server with the given configuration.
@@ -70,6 +71,10 @@ func New(config Config) *Server {
 		nextEID:     1,
 		stopCh:      make(chan struct{}),
 		world:       world.NewWorld(seed),
+		gamerules: map[string]string{
+			"acidWater":       "false",
+			"acidWaterDamage": "1.0",
+		},
 	}
 }
 
@@ -243,4 +248,26 @@ func (s *Server) playerCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.players)
+}
+
+func (s *Server) GameRuleBool(name string) bool {
+	s.mu.RLock()
+	val, ok := s.gamerules[name]
+	s.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	return val == "true"
+}
+
+func (s *Server) GameRuleFloat(name string) float32 {
+	s.mu.RLock()
+	val, ok := s.gamerules[name]
+	s.mu.RUnlock()
+	if !ok {
+		return 0.0
+	}
+	var fval float32
+	fmt.Sscanf(val, "%f", &fval)
+	return fval
 }

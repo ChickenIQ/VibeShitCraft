@@ -380,3 +380,17 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 	protocol.WritePacket(viewer.Conn, spawnPlayer)
 	viewer.mu.Unlock()
 }
+
+func (s *Server) sendTabComplete(player *Player, matches []string) {
+	pkt := protocol.MarshalPacket(0x3A, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, int32(len(matches)))
+		for _, match := range matches {
+			protocol.WriteString(w, match)
+		}
+	})
+	player.mu.Lock()
+	if player.Conn != nil {
+		protocol.WritePacket(player.Conn, pkt)
+	}
+	player.mu.Unlock()
+}

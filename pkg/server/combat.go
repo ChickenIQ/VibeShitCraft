@@ -31,24 +31,15 @@ func (s *Server) handleAttack(attacker *Player, targetID int32) {
 		return
 	}
 
-	// Apply damage
-	damage := float32(2.0) // 1 heart
-	target.Health -= damage
-	if target.Health <= 0 {
-		target.Health = 0
-		target.IsDead = true
-	}
-	isDead := target.IsDead
-
 	// Calculate knockback
 	attackerX, attackerZ := attacker.X, attacker.Z
 	targetX, targetZ := target.X, target.Z
 	target.mu.Unlock()
 
-	// Broadcast damage animation (1 = take damage)
-	s.broadcastAnimation(target, 1)
-	// Broadcast hurt status (2 = hurt)
-	s.broadcastEntityStatus(target.EntityID, 2)
+	// Apply damage
+	damage := float32(2.0) // 1 heart
+	deathMessage := "was slain by " + attacker.Username
+	isDead := s.applyDamage(target, damage, deathMessage)
 
 	// Apply knockback if not dead
 	if !isDead {
@@ -65,6 +56,27 @@ func (s *Server) handleAttack(attacker *Player, targetID int32) {
 			s.sendEntityVelocity(target, vx, vy, vz)
 		}
 	}
+}
+
+func (s *Server) applyDamage(target *Player, damage float32, deathMessage string) bool {
+	target.mu.Lock()
+	if target.IsDead || target.GameMode == GameModeCreative || target.GameMode == GameModeSpectator {
+		target.mu.Unlock()
+		return false
+	}
+
+	target.Health -= damage
+	if target.Health <= 0 {
+		target.Health = 0
+		target.IsDead = true
+	}
+	isDead := target.IsDead
+	target.mu.Unlock()
+
+	// Broadcast damage animation (1 = take damage)
+	s.broadcastAnimation(target, 1)
+	// Broadcast hurt status (2 = hurt)
+	s.broadcastEntityStatus(target.EntityID, 2)
 
 	// Update health for the target player
 	s.sendHealth(target)
@@ -73,9 +85,11 @@ func (s *Server) handleAttack(attacker *Player, targetID int32) {
 		// Broadcast dead status (3 = dead)
 		s.broadcastEntityStatus(target.EntityID, 3)
 		// Broadcast death message
-		s.broadcastChat(chat.Colored(target.Username+" was slain by "+attacker.Username, "red"))
-		log.Printf("Player %s was slain by %s", target.Username, attacker.Username)
+		s.broadcastChat(chat.Colored(target.Username+" "+deathMessage, "red"))
+		log.Printf("Player %s %s", target.Username, deathMessage)
 	}
+
+	return isDead
 }
 
 func (s *Server) sendEntityVelocity(player *Player, vx, vy, vz float64) {
