@@ -780,6 +780,21 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY int, place func(wx, y, wz int, s
 		placeRoof(hx-1, surfY+hallHeight+1, hz+dz, stairs|0)
 		placeRoof(hx+hallMaxX+1, surfY+hallHeight+1, hz+dz, stairs|1)
 
+		// At the back gable, extend the roof one block further outward
+		// so the roof overhangs the back by one block. Apply the
+		// overhang to multiple stepped rows so the profile matches
+		// the desired stepped look.
+		if dz == hallMaxZ {
+			// Outer overhang for the lowest slope row
+			placeRoof(hx-2, surfY+hallHeight+1, hz+dz, stairs|0)
+			placeRoof(hx+hallMaxX+2, surfY+hallHeight+1, hz+dz, stairs|1)
+			// Overhang for the next slope rows to create stepped eaves
+			placeRoof(hx-2, surfY+hallHeight+2, hz+dz, stairs|0)
+			placeRoof(hx+hallMaxX+2, surfY+hallHeight+2, hz+dz, stairs|1)
+			placeRoof(hx-2, surfY+hallHeight+3, hz+dz, stairs|0)
+			placeRoof(hx+hallMaxX+2, surfY+hallHeight+3, hz+dz, stairs|1)
+		}
+
 		placeRoof(hx, surfY+hallHeight+1, hz+dz, cobble)
 		placeRoof(hx, surfY+hallHeight+2, hz+dz, stairs|0)
 
