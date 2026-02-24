@@ -248,6 +248,9 @@ func (s *Server) handleBlockPlacement(player *Player, r *bytes.Reader) {
 		})
 		s.mu.RLock()
 		for _, p := range s.players {
+			if p.EntityID == player.EntityID {
+				continue
+			}
 			p.mu.Lock()
 			if p.Conn != nil {
 				protocol.WritePacket(p.Conn, soundPkt)
@@ -257,6 +260,82 @@ func (s *Server) handleBlockPlacement(player *Player, r *bytes.Reader) {
 		s.mu.RUnlock()
 
 		return // Don't place a block!
+	}
+
+	// Handle bonemeal on crops and saplings
+	if itemID == 351 && damage == 15 {
+		isCrop := clickedBlockID == 59 || clickedBlockID == 141 || clickedBlockID == 142 || clickedBlockID == 104 || clickedBlockID == 105
+		isSapling := clickedBlockID == 6
+
+		success := false
+
+		if isCrop {
+			currentMeta := clickedBlockState & 0x0F
+			if currentMeta < 7 {
+				growth := uint16(2 + rand.Intn(4))
+				newMeta := currentMeta + growth
+				if newMeta > 7 {
+					newMeta = 7
+				}
+				newBlockState := (uint16(clickedBlockID) << 4) | newMeta
+				s.world.SetBlock(x, y, z, newBlockState)
+				s.broadcastBlockChange(x, y, z, newBlockState)
+				success = true
+				log.Printf("Player %s bonemealed crop %d at (%d, %d, %d) to stage %d", player.Username, clickedBlockID, x, y, z, newMeta)
+			}
+		} else if isSapling {
+			meta := clickedBlockState & 0x0F
+			woodType := meta & 0x07
+
+			// Determine growth size
+			size := 1
+			tx, tz := x, z
+
+			if woodType == 5 { // Dark Oak requires 3x3 for giant
+				if rx, rz, found := s.check3x3Sapling(x, y, z, meta); found {
+					size = 3
+					tx, tz = rx, rz
+				} else {
+					// Dark Oak doesn't grow in 1x1 or 2x2
+					return // Don't consume bonemeal
+				}
+			} else {
+				if rx, rz, found := s.check2x2Sapling(x, y, z, meta); found {
+					size = 2
+					tx, tz = rx, rz
+				}
+			}
+
+			// Grow tree (45% chance to succeed instantly per bonemeal as a simple approx)
+			if rand.Float32() < 0.45 {
+				s.growTree(tx, y, tz, meta, size)
+			}
+			success = true // Consume bonemeal even if it didn't grow this tick
+		}
+
+		if success {
+			if player.GameMode == GameModeSurvival {
+				player.mu.Lock()
+				slotIndex := 36 + player.ActiveSlot
+				if player.Inventory[slotIndex].Count > 0 {
+					player.Inventory[slotIndex].Count--
+					if player.Inventory[slotIndex].Count <= 0 {
+						player.Inventory[slotIndex] = Slot{ItemID: -1}
+					}
+					slot := player.Inventory[slotIndex]
+					pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+						protocol.WriteByte(w, 0)
+						protocol.WriteInt16(w, int16(slotIndex))
+						protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+					})
+					if player.Conn != nil {
+						protocol.WritePacket(player.Conn, pkt)
+					}
+				}
+				player.mu.Unlock()
+			}
+			return
+		}
 	}
 
 	// Handle spawn egg right-click on a block
@@ -297,6 +376,18 @@ func (s *Server) handleBlockPlacement(player *Player, r *bytes.Reader) {
 	var placedBlockID int16 = itemID
 
 	switch itemID {
+	case 295: // Wheat Seeds -> Wheat Crop block
+		placedBlockID = 59
+	case 391: // Carrot -> Carrot Crop block
+		placedBlockID = 141
+	case 392: // Potato -> Potato Crop block
+		placedBlockID = 142
+	case 338: // Sugar Cane -> Sugar Cane block
+		placedBlockID = 83
+	case 361: // Pumpkin Seeds -> Pumpkin Stem block
+		placedBlockID = 104
+	case 362: // Melon Seeds -> Melon Stem block
+		placedBlockID = 105
 	case 324:
 		placedBlockID = 64
 		isDoor = true
@@ -377,25 +468,72 @@ func (s *Server) handleBlockPlacement(player *Player, r *bytes.Reader) {
 		return
 	}
 
+	// Placement validation
+	validPlacement := true
+	belowID := s.world.GetBlock(tx, ty-1, tz) >> 4
+
 	if isDoor {
 		// Check if we can place the top half
 		topBlockID := s.world.GetBlock(tx, ty+1, tz) >> 4
 		if ty >= 254 || (topBlockID != 0 && topBlockID != 8 && topBlockID != 9 && topBlockID != 10 && topBlockID != 11) {
-			// Cancel placement
-			player.mu.Lock()
-			slotIndex := 36 + player.ActiveSlot
-			slot := player.Inventory[slotIndex]
-			pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
-				protocol.WriteByte(w, 0)
-				protocol.WriteInt16(w, int16(slotIndex))
-				protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
-			})
-			if player.Conn != nil {
-				protocol.WritePacket(player.Conn, pkt)
-			}
-			player.mu.Unlock()
-			return
+			validPlacement = false
 		}
+	} else if placedBlockID == 59 || placedBlockID == 141 || placedBlockID == 142 || placedBlockID == 104 || placedBlockID == 105 { // Crops
+		if belowID != 60 {
+			validPlacement = false
+		}
+	} else if placedBlockID == 83 { // Sugar Cane
+		if belowID != 12 && belowID != 3 && belowID != 2 {
+			validPlacement = false
+		} else {
+			// Check adjacent blocks for water (8 or 9)
+			waterFound := false
+			adj := []struct{ dx, dz int32 }{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}
+			for _, d := range adj {
+				adjID := s.world.GetBlock(tx+d.dx, ty-1, tz+d.dz) >> 4
+				if adjID == 8 || adjID == 9 {
+					waterFound = true
+					break
+				}
+			}
+			if !waterFound {
+				validPlacement = false
+			}
+		}
+	} else if placedBlockID == 81 { // Cactus
+		if belowID != 12 {
+			validPlacement = false
+		} else {
+			// Cactus cannot be placed adjacent to a solid block
+			adj := []struct{ dx, dz int32 }{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}
+			for _, d := range adj {
+				adjBlock := s.world.GetBlock(tx+d.dx, ty, tz+d.dz) >> 4
+				if adjBlock != 0 && adjBlock != 8 && adjBlock != 9 && adjBlock != 10 && adjBlock != 11 {
+					validPlacement = false
+					break
+				}
+			}
+		}
+	} else if placedBlockID == 6 { // Sapling
+		if belowID != 3 && belowID != 2 {
+			validPlacement = false
+		}
+	}
+
+	if !validPlacement {
+		player.mu.Lock()
+		slotIndex := 36 + player.ActiveSlot
+		slot := player.Inventory[slotIndex]
+		pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+			protocol.WriteByte(w, 0)
+			protocol.WriteInt16(w, int16(slotIndex))
+			protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+		})
+		if player.Conn != nil {
+			protocol.WritePacket(player.Conn, pkt)
+		}
+		player.mu.Unlock()
+		return
 	}
 
 	// Compute correct metadata for directional blocks
@@ -442,6 +580,496 @@ func (s *Server) handleBlockPlacement(player *Player, r *bytes.Reader) {
 	}
 
 	log.Printf("Player %s placed block %d (from item %d) at (%d, %d, %d)", player.Username, placedBlockID, itemID, tx, ty, tz)
+}
+
+// check2x2Sapling checks if the sapling at (x, y, z) is part of a 2x2 square
+// northwest (minimum X, minimum Z) sapling in the square, and true if found.
+func (s *Server) check2x2Sapling(x, y, z int32, meta uint16) (int32, int32, bool) {
+	saplingID := uint16(6)
+	target := (saplingID << 4) | (meta & 0x07)
+
+	for ox := int32(-1); ox <= 0; ox++ {
+		for oz := int32(-1); oz <= 0; oz++ {
+			match := true
+			for dx := int32(0); dx <= 1; dx++ {
+				for dz := int32(0); dz <= 1; dz++ {
+					if s.world.GetBlock(x+ox+dx, y, z+oz+dz) != target {
+						match = false
+						break
+					}
+				}
+				if !match {
+					break
+				}
+			}
+			if match {
+				return x + ox, z + oz, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+// check3x3Sapling checks if the sapling at (x, y, z) is part of a 3x3 square
+// northwest (minimum X, minimum Z) sapling in the square, and true if found.
+func (s *Server) check3x3Sapling(x, y, z int32, meta uint16) (int32, int32, bool) {
+	saplingID := uint16(6)
+	target := (saplingID << 4) | (meta & 0x07)
+
+	for ox := int32(-2); ox <= 0; ox++ {
+		for oz := int32(-2); oz <= 0; oz++ {
+			// Check if (x+ox, y, z+oz) is the top-left of a 3x3
+			match := true
+			for dx := int32(0); dx <= 2; dx++ {
+				for dz := int32(0); dz <= 2; dz++ {
+					if s.world.GetBlock(x+ox+dx, y, z+oz+dz) != target {
+						match = false
+						break
+					}
+				}
+				if !match {
+					break
+				}
+			}
+			if match {
+				return x + ox, z + oz, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func (s *Server) growTree(x, y, z int32, saplingMeta uint16, size int) {
+	// Determine log/leaf types from sapling metadata
+	var logID uint16 = 17
+	var leafID uint16 = 18
+	// 0=oak, 1=spruce, 2=birch, 3=jungle, 4=acacia, 5=dark oak
+	woodType := saplingMeta & 0x07
+	if woodType > 3 {
+		logID = 162
+		leafID = 161
+		woodType -= 4
+	}
+
+	logState := (logID << 4) | woodType
+	leafState := (leafID << 4) | woodType
+
+	// Clear sapling(s)
+	if size == 3 {
+		for dx := int32(0); dx <= 2; dx++ {
+			for dz := int32(0); dz <= 2; dz++ {
+				s.world.SetBlock(x+dx, y, z+dz, 0)
+				s.broadcastBlockChange(x+dx, y, z+dz, 0)
+			}
+		}
+	} else if size == 2 {
+		for dx := int32(0); dx <= 1; dx++ {
+			for dz := int32(0); dz <= 1; dz++ {
+				s.world.SetBlock(x+dx, y, z+dz, 0)
+				s.broadcastBlockChange(x+dx, y, z+dz, 0)
+			}
+		}
+	} else {
+		s.world.SetBlock(x, y, z, 0)
+		s.broadcastBlockChange(x, y, z, 0)
+	}
+
+	switch saplingMeta & 0x07 {
+	case 1: // Spruce
+		if size >= 2 {
+			height := int32(20 + rand.Intn(10))
+			// 2x2 Trunk
+			for i := int32(0); i < height; i++ {
+				for dx := int32(0); dx <= 1; dx++ {
+					for dz := int32(0); dz <= 1; dz++ {
+						s.world.SetBlock(x+dx, y+i, z+dz, logState)
+						s.broadcastBlockChange(x+dx, y+i, z+dz, logState)
+					}
+				}
+			}
+			// Organic Tiers
+			for ly := y + 4; ly <= y+height+2; ly++ {
+				radius := (y + height + 2 - ly) / 3
+				if ly >= y+height-4 {
+					radius = 1
+				}
+				if rand.Intn(4) == 0 {
+					radius++
+				} // Jitter
+				for lx := x - radius; lx <= x+radius+1; lx++ {
+					for lz := z - radius; lz <= z+radius+1; lz++ {
+						dist := (lx-x)*(lx-x) + (lz-z)*(lz-z)
+						if dist < (radius+1)*(radius+1)-int32(rand.Intn(2)) {
+							if s.world.GetBlock(lx, ly, lz)>>4 == 0 {
+								s.world.SetBlock(lx, ly, lz, leafState)
+								s.broadcastBlockChange(lx, ly, lz, leafState)
+							}
+						}
+					}
+				}
+			}
+		} else {
+			height := int32(7 + rand.Intn(3))
+			for i := int32(0); i < height; i++ {
+				s.world.SetBlock(x, y+i, z, logState)
+				s.broadcastBlockChange(x, y+i, z, logState)
+			}
+			for ly := y + 2; ly <= y+height; ly++ {
+				radius := (y + height - ly) / 2
+				if ly == y+height {
+					radius = 0
+				} else if (y+height-ly)%2 == 0 {
+					radius++
+				}
+				for lx := x - radius; lx <= x+radius; lx++ {
+					for lz := z - radius; lz <= z+radius; lz++ {
+						if (lx-x)*(lx-x)+(lz-z)*(lz-z) <= radius*radius {
+							if s.world.GetBlock(lx, ly, lz)>>4 == 0 {
+								s.world.SetBlock(lx, ly, lz, leafState)
+								s.broadcastBlockChange(lx, ly, lz, leafState)
+							}
+						}
+					}
+				}
+			}
+		}
+	case 2: // Birch
+		if size >= 2 {
+			height := int32(15 + rand.Intn(8))
+			// 2x2 Trunk
+			for i := int32(0); i < height; i++ {
+				for dx := int32(0); dx <= 1; dx++ {
+					for dz := int32(0); dz <= 1; dz++ {
+						s.world.SetBlock(x+dx, y+i, z+dz, logState)
+						s.broadcastBlockChange(x+dx, y+i, z+dz, logState)
+					}
+				}
+			}
+			// Organic canopy with small limbs
+			for _, dr := range []struct{ dx, dz int32 }{{1, 1}, {-1, 1}, {1, -1}, {-1, -1}} {
+				lx, ly, lz := x, y+height-4, z
+				if dr.dx > 0 {
+					lx++
+				}
+				if dr.dz > 0 {
+					lz++
+				}
+				for i := 0; i < 4; i++ {
+					ly++
+					lx += dr.dx
+					lz += dr.dz
+					s.world.SetBlock(lx, ly, lz, logState)
+					s.broadcastBlockChange(lx, ly, lz, logState)
+					r := int32(2 + rand.Intn(2))
+					for lly := ly; lly <= ly+2; lly++ {
+						for llx := lx - r; llx <= lx+r; llx++ {
+							for llz := lz - r; llz <= lz+r; llz++ {
+								if (llx-lx)*(llx-lx)+(llz-lz)*(llz-lz) < r*r {
+									if s.world.GetBlock(llx, lly, llz)>>4 == 0 {
+										s.world.SetBlock(llx, lly, llz, leafState)
+										s.broadcastBlockChange(llx, lly, llz, leafState)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		} else {
+			height := int32(5 + rand.Intn(3))
+			for i := int32(0); i < height; i++ {
+				s.world.SetBlock(x, y+i, z, logState)
+				s.broadcastBlockChange(x, y+i, z, logState)
+			}
+			for ly := y + height - 3; ly <= y+height+1; ly++ {
+				radius := int32(2)
+				if ly >= y+height {
+					radius = 1
+				}
+				for lx := x - radius; lx <= x+radius; lx++ {
+					for lz := z - radius; lz <= z+radius; lz++ {
+						if (lx-x)*(lx-x)+(lz-z)*(lz-z) <= radius*radius+1 {
+							if s.world.GetBlock(lx, ly, lz)>>4 == 0 {
+								s.world.SetBlock(lx, ly, lz, leafState)
+								s.broadcastBlockChange(lx, ly, lz, leafState)
+							}
+						}
+					}
+				}
+			}
+		}
+
+	case 3: // Jungle
+		if size >= 2 {
+			height := int32(25 + rand.Intn(15))
+			for i := int32(0); i < height; i++ {
+				for dx := int32(0); dx <= 1; dx++ {
+					for dz := int32(0); dz <= 1; dz++ {
+						s.world.SetBlock(x+dx, y+i, z+dz, logState)
+						s.broadcastBlockChange(x+dx, y+i, z+dz, logState)
+					}
+				}
+				// Buttress roots at base
+				if i < 6 {
+					off := []struct{ dx, dz int32 }{{-1, 0}, {2, 0}, {0, -1}, {0, 2}, {1, -1}, {1, 2}, {-1, 1}, {2, 1}}
+					for _, o := range off {
+						if i < 5-int32(math.Abs(float64(o.dx)))-int32(math.Abs(float64(o.dz))) {
+							s.world.SetBlock(x+o.dx, y+i, z+o.dz, logState)
+							s.broadcastBlockChange(x+o.dx, y+i, z+o.dz, logState)
+						}
+					}
+				}
+			}
+			// Clumped foliage
+			for h := int32(10); h < height+3; h += 4 {
+				r := int32(3 + rand.Intn(3))
+				for ly := y + h; ly < y+h+3; ly++ {
+					for lx := x - r; lx <= x+r+1; lx++ {
+						for lz := z - r; lz <= z+r+1; lz++ {
+							if (lx-x)*(lx-x)+(lz-z)*(lz-z) < r*r+int32(rand.Intn(3)) {
+								if s.world.GetBlock(lx, ly, lz)>>4 == 0 {
+									s.world.SetBlock(lx, ly, lz, leafState)
+									s.broadcastBlockChange(lx, ly, lz, leafState)
+								}
+							}
+						}
+					}
+				}
+			}
+		} else {
+			height := int32(10 + rand.Intn(4))
+			for i := int32(0); i < height; i++ {
+				s.world.SetBlock(x, y+i, z, logState)
+				s.broadcastBlockChange(x, y+i, z, logState)
+			}
+			for ly := y + height - 2; ly <= y+height+1; ly++ {
+				radius := int32(2)
+				if ly > y+height-1 {
+					radius = 1
+				}
+				for lx := x - radius; lx <= x+radius; lx++ {
+					for lz := z - radius; lz <= z+radius; lz++ {
+						if (lx-x)*(lx-x)+(lz-z)*(lz-z) <= radius*radius+1 {
+							if s.world.GetBlock(lx, ly, lz)>>4 == 0 {
+								s.world.SetBlock(lx, ly, lz, leafState)
+								s.broadcastBlockChange(lx, ly, lz, leafState)
+							}
+						}
+					}
+				}
+			}
+		}
+
+	case 4: // Acacia
+		if size >= 2 {
+			height := int32(10 + rand.Intn(6))
+			for i := int32(0); i < height; i++ {
+				for dx := int32(0); dx <= 1; dx++ {
+					for dz := int32(0); dz <= 1; dz++ {
+						s.world.SetBlock(x+dx, y+i, z+dz, logState)
+						s.broadcastBlockChange(x+dx, y+i, z+dz, logState)
+					}
+				}
+			}
+			for _, dir := range []struct{ dx, dz int32 }{{1, 1}, {-1, 1}, {1, -1}, {-1, -1}, {2, 0}, {-2, 0}, {0, 2}, {0, -2}} {
+				by := y + height/2 + int32(rand.Intn(int(height/2)))
+				bx, bz := x, z
+				if dir.dx > 0 {
+					bx++
+				}
+				if dir.dz > 0 {
+					bz++
+				}
+				blen := 4 + rand.Intn(4)
+				for i := 0; i < blen; i++ {
+					by += int32(i / 3)
+					bx += dir.dx
+					bz += dir.dz
+					s.world.SetBlock(bx, by, bz, logState)
+					s.broadcastBlockChange(bx, by, bz, logState)
+					if i >= blen-2 {
+						for ly := by; ly <= by+1; ly++ {
+							r := int32(2)
+							for lx := bx - r; lx <= bx+r; lx++ {
+								for lz := bz - r; lz <= bz+r; lz++ {
+									if s.world.GetBlock(lx, ly, lz)>>4 == 0 {
+										s.world.SetBlock(lx, ly, lz, leafState)
+										s.broadcastBlockChange(lx, ly, lz, leafState)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		} else {
+			height := int32(5 + rand.Intn(3))
+			for i := int32(0); i < height; i++ {
+				s.world.SetBlock(x, y+i, z, logState)
+				s.broadcastBlockChange(x, y+i, z, logState)
+			}
+			dx, dz := int32(1), int32(1)
+			if rand.Intn(2) == 0 {
+				dx = -1
+			}
+			if rand.Intn(2) == 0 {
+				dz = -1
+			}
+			bx, by, bz := x, y+height-1, z
+			for i := 0; i < 3; i++ {
+				by++
+				if i > 0 {
+					bx += dx
+					bz += dz
+				}
+				s.world.SetBlock(bx, by, bz, logState)
+				s.broadcastBlockChange(bx, by, bz, logState)
+			}
+			for ly := by; ly <= by+1; ly++ {
+				radius := int32(2)
+				if ly > by {
+					radius = 1
+				}
+				for lx := bx - radius; lx <= bx+radius; lx++ {
+					for lz := bz - radius; lz <= bz+radius; lz++ {
+						if s.world.GetBlock(lx, ly, lz)>>4 == 0 {
+							s.world.SetBlock(lx, ly, lz, leafState)
+							s.broadcastBlockChange(lx, ly, lz, leafState)
+						}
+					}
+				}
+			}
+		}
+
+	case 5: // Dark Oak (Size 3 Giant)
+		if size >= 3 {
+			height := int32(15 + rand.Intn(10))
+			// 3x3 Trunk
+			for i := int32(0); i < height; i++ {
+				for dx := int32(0); dx <= 2; dx++ {
+					for dz := int32(0); dz <= 2; dz++ {
+						s.world.SetBlock(x+dx, y+i, z+dz, logState)
+						s.broadcastBlockChange(x+dx, y+i, z+dz, logState)
+					}
+				}
+			}
+			// Organic Roots & Limbs
+			dirs := []struct{ dx, dz int32 }{{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}}
+			for _, d := range dirs {
+				// Base roots
+				for i := int32(1); i <= 3; i++ {
+					s.world.SetBlock(x+1+d.dx*i, y, z+1+d.dz*i, logState)
+					s.broadcastBlockChange(x+1+d.dx*i, y, z+1+d.dz*i, logState)
+				}
+				// Branch limbs
+				lx, ly, lz := x+1, y+height/3+int32(rand.Intn(int(height/2))), z+1
+				blen := 6 + rand.Intn(6)
+				for i := 0; i < blen; i++ {
+					ly += int32(i / 3)
+					lx += d.dx
+					lz += d.dz
+					s.world.SetBlock(lx, ly, lz, logState)
+					s.broadcastBlockChange(lx, ly, lz, logState)
+					if i >= blen-4 {
+						r := int32(3 + rand.Intn(2))
+						for lly := ly - 1; lly <= ly+2; lly++ {
+							for llx := lx - r; llx <= lx+r; llx++ {
+								for llz := lz - r; llz <= lz+r; llz++ {
+									if (llx-lx)*(llx-lx)+(llz-lz)*(llz-lz) < r*r {
+										if s.world.GetBlock(llx, lly, llz)>>4 == 0 {
+											s.world.SetBlock(llx, lly, llz, leafState)
+											s.broadcastBlockChange(llx, lly, llz, leafState)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		} else {
+			height := int32(4 + rand.Intn(2))
+			for i := int32(0); i < height; i++ {
+				s.world.SetBlock(x, y+i, z, logState)
+				s.broadcastBlockChange(x, y+i, z, logState)
+			}
+		}
+
+	default: // Oak
+		if size >= 2 {
+			height := int32(12 + rand.Intn(8))
+			// 2x2 Trunk spreading at top
+			for i := int32(0); i < height; i++ {
+				for dx := int32(0); dx <= 1; dx++ {
+					for dz := int32(0); dz <= 1; dz++ {
+						s.world.SetBlock(x+dx, y+i, z+dz, logState)
+						s.broadcastBlockChange(x+dx, y+i, z+dz, logState)
+					}
+				}
+			}
+			// Spreading organic limbs
+			for _, dr := range []struct{ dx, dz int32 }{{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, -1}, {1, -1}, {-1, 1}} {
+				lx, ly, lz := x, y+height/2+int32(rand.Intn(int(height/2))), z
+				if dr.dx > 0 {
+					lx++
+				}
+				if dr.dz > 0 {
+					lz++
+				}
+
+				limbLen := 3 + rand.Intn(5)
+				for i := 0; i < limbLen; i++ {
+					ly += int32(i / 2)
+					lx += dr.dx
+					lz += dr.dz
+					s.world.SetBlock(lx, ly, lz, logState)
+					s.broadcastBlockChange(lx, ly, lz, logState)
+
+					// Leaf clumps at limb ends and along
+					if i >= limbLen-3 {
+						r := int32(2 + rand.Intn(2))
+						for lly := ly - 1; lly <= ly+1; lly++ {
+							for llx := lx - r; llx <= lx+r; llx++ {
+								for llz := lz - r; llz <= lz+r; llz++ {
+									if (llx-lx)*(llx-lx)+(llz-lz)*(llz-lz) < r*r {
+										if s.world.GetBlock(llx, lly, llz)>>4 == 0 {
+											s.world.SetBlock(llx, lly, llz, leafState)
+											s.broadcastBlockChange(llx, lly, llz, leafState)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		} else {
+			// Standard 1x1 Oak
+			height := int32(4 + rand.Intn(3))
+			for i := int32(0); i < height; i++ {
+				s.world.SetBlock(x, y+i, z, logState)
+				s.broadcastBlockChange(x, y+i, z, logState)
+			}
+			for ly := y + height - 2; ly <= y+height+1; ly++ {
+				radius := int32(2)
+				if ly >= y+height {
+					radius = 1
+				}
+				for lx := x - radius; lx <= x+radius; lx++ {
+					for lz := z - radius; lz <= z+radius; lz++ {
+						if (lx-x)*(lx-x)+(lz-z)*(lz-z) <= radius*radius+1 {
+							if s.world.GetBlock(lx, ly, lz)>>4 == 0 {
+								s.world.SetBlock(lx, ly, lz, leafState)
+								s.broadcastBlockChange(lx, ly, lz, leafState)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	log.Printf("Tree grown at (%d, %d, %d) type %d", x, y, z, saplingMeta&0x07)
 }
 
 // faceOffset returns the target block position when placing against a face.

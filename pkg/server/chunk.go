@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"net"
 
 	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
 )
@@ -46,7 +45,9 @@ func (s *Server) sendChunkColumn(player *Player, cx, cz int32) {
 		w.Write(chunkData)                             // Data
 	})
 	player.mu.Lock()
-	protocol.WritePacket(player.Conn, pkt)
+	if player.Conn != nil {
+		protocol.WritePacket(player.Conn, pkt)
+	}
 	player.mu.Unlock()
 }
 
@@ -98,18 +99,12 @@ func (s *Server) sendChunkUpdates(player *Player) {
 			protocol.WriteVarInt(w, 0)  // Size: 0
 		})
 		player.mu.Lock()
-		protocol.WritePacket(player.Conn, pkt)
+		if player.Conn != nil {
+			protocol.WritePacket(player.Conn, pkt)
+		}
 		player.mu.Unlock()
 	}
-}
 
-func (s *Server) sendBlockModifications(conn net.Conn) {
-	modifications := s.world.GetModifications()
-	for pos, blockState := range modifications {
-		pkt := protocol.MarshalPacket(0x23, func(w *bytes.Buffer) {
-			protocol.WritePosition(w, pos.X, pos.Y, pos.Z)
-			protocol.WriteVarInt(w, int32(blockState))
-		})
-		protocol.WritePacket(conn, pkt)
-	}
+	// Update entity tracking (e.g. spawn players who just came into range)
+	s.updateEntityTracking(player)
 }

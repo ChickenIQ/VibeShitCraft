@@ -47,138 +47,263 @@ func (s *Server) entityPhysicsLoop() {
 	}
 }
 
+// checkEntityCollision checks if the given AABB intersects with any solid blocks
+func (s *Server) checkEntityCollision(x, y, z, width, height float64) bool {
+	minX := int32(math.Floor(x - width/2))
+	maxX := int32(math.Floor(x + width/2))
+	minY := int32(math.Floor(y))
+	maxY := int32(math.Floor(y + height))
+	minZ := int32(math.Floor(z - width/2))
+	maxZ := int32(math.Floor(z + width/2))
+
+	for bx := minX; bx <= maxX; bx++ {
+		for by := minY; by <= maxY; by++ {
+			for bz := minZ; bz <= maxZ; bz++ {
+				block := s.world.GetBlock(bx, by, bz)
+				if isSolidBlock(block >> 4) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// isSolidBlock returns true if the block ID represents a physical solid block.
+func isSolidBlock(blockID uint16) bool {
+	switch blockID {
+	case 0: // Air
+		return false
+	case 8, 9: // Water
+		return false
+	case 10, 11: // Lava
+		return false
+	case 30: // Cobweb
+		return false
+	case 31, 32: // Tall grass, Dead bush
+		return false
+	case 37, 38, 39, 40, 175: // Flowers and mushrooms
+		return false
+	case 50, 75, 76: // Torches
+		return false
+	case 51: // Fire
+		return false
+	case 55: // Redstone wire
+		return false
+	case 59, 83, 104, 105, 115, 141, 142: // Crops/plants
+		return false
+	case 63, 68: // Signs
+		return false
+	case 65: // Ladder
+		return false
+	case 69, 77, 143: // Lever, buttons
+		return false
+	case 27, 28, 66, 157: // Rails
+		return false
+	case 70, 72, 147, 148: // Pressure plates
+		return false
+	case 106: // Vines
+		return false
+	case 171: // Carpet
+		return false
+	}
+	return true
+}
+
 func (s *Server) tickEntityPhysics() {
 	const gravity = 0.04
 	const drag = 0.98
-	const groundDrag = 0.5
+	const groundDrag = 0.58 // 0.98 * 0.6 (slipperiness) approx 0.58
 
 	s.mu.Lock()
 
-	// Collect entities that moved so we can broadcast after releasing the lock
 	type movedItem struct {
-		entityID int32
-		x, y, z  float64
+		entityID   int32
+		x, y, z    float64
+		vx, vy, vz float64
 	}
 	var movedItems []movedItem
 
 	for _, item := range s.entities {
-		if item.VX == 0 && item.VY == 0 && item.VZ == 0 {
-			// Check if entity is supported by ground
-			blockBelow := s.world.GetBlock(int32(math.Floor(item.X)), int32(math.Floor(item.Y-0.1)), int32(math.Floor(item.Z)))
-			if blockBelow>>4 != 0 {
-				continue
+		const itemWidth = 0.25
+		const itemHeight = 0.25
+
+		blockAtCenter := s.world.GetBlock(int32(math.Floor(item.X)), int32(math.Floor(item.Y)), int32(math.Floor(item.Z)))
+		centerID := blockAtCenter >> 4
+		inWater := centerID == 8 || centerID == 9
+		inLava := centerID == 10 || centerID == 11
+
+		// Apply fluid buoyancy and specialized drag, else apply standard gravity
+		if inWater || inLava {
+			item.VY -= gravity * 0.5 // Reduce gravity effect
+			item.VX *= 0.5           // Extra horizontal drag from liquid
+			item.VZ *= 0.5
+
+			// Cap downward velocity in liquids
+			if item.VY < -0.1 {
+				item.VY = -0.1
 			}
-			// Not on ground and no velocity - start falling
+			// Slight float if entirely submerged (this requires checking head-level but simple approximation is VY cap)
+		} else {
+			item.VY -= gravity
 		}
 
-		// Apply gravity
-		item.VY -= gravity
+		// X movement: Attempt to move on X axis. If collision occurs, halt X velocity.
+		if !s.checkEntityCollision(item.X+item.VX, item.Y, item.Z, itemWidth, itemHeight) {
+			item.X += item.VX
+		} else {
+			item.VX = 0
+		}
 
-		// Apply drag
-		item.VX *= drag
+		// Y movement: Attempt to move on Y axis.
+		onGround := false
+		if !s.checkEntityCollision(item.X, item.Y+item.VY, item.Z, itemWidth, itemHeight) {
+			item.Y += item.VY
+		} else {
+			// Collision on Y axis. If falling (VY < 0), we hit the ground.
+			if item.VY < 0 {
+				onGround = true
+			}
+
+			// Simulate item bounce, but NOT if we are in water/lava
+			if inWater || inLava {
+				item.VY = 0
+			} else {
+				item.VY *= -0.5 // Bounce multiplier
+				if math.Abs(item.VY) < 0.1 {
+					item.VY = 0 // Stop micro-bounces once energy is low enough
+				}
+				// When resting on solid ground (not liquid), snap the item to the exact block boundary
+				// to prevent it from visually hovering or clipping into the floor
+				if onGround && item.VY == 0 {
+					item.Y = math.Floor(item.Y)
+				}
+			}
+		}
+
+		// Z movement: Attempt to move on Z axis. If collision occurs, halt Z velocity.
+		if !s.checkEntityCollision(item.X, item.Y, item.Z+item.VZ, itemWidth, itemHeight) {
+			item.Z += item.VZ
+		} else {
+			item.VZ = 0
+		}
+
+		// Apply friction & drag depending on if item is on the ground
+		f := drag
+		if onGround {
+			f = groundDrag
+		}
+		item.VX *= f
 		item.VY *= drag
-		item.VZ *= drag
+		item.VZ *= f
 
-		// Calculate new position
-		newX := item.X + item.VX
-		newY := item.Y + item.VY
-		newZ := item.Z + item.VZ
-
-		// Ground collision check
-		blockAtNew := s.world.GetBlock(int32(math.Floor(newX)), int32(math.Floor(newY)), int32(math.Floor(newZ)))
-		if blockAtNew>>4 != 0 {
-			// Hit solid block - place on top
-			newY = math.Floor(newY) + 1.0
+		// Zero out tiny velocities to prevent endless micro-movement computations
+		if math.Abs(item.VX) < 0.001 {
+			item.VX = 0
+		}
+		if math.Abs(item.VY) < 0.001 {
 			item.VY = 0
-			item.VX *= groundDrag
-			item.VZ *= groundDrag
-
-			// Stop tiny velocities
-			if math.Abs(item.VX) < 0.001 {
-				item.VX = 0
-			}
-			if math.Abs(item.VZ) < 0.001 {
-				item.VZ = 0
-			}
+		}
+		if math.Abs(item.VZ) < 0.001 {
+			item.VZ = 0
 		}
 
-		item.X = newX
-		item.Y = newY
-		item.Z = newZ
-
-		movedItems = append(movedItems, movedItem{item.EntityID, item.X, item.Y, item.Z})
+		movedItems = append(movedItems, movedItem{item.EntityID, item.X, item.Y, item.Z, item.VX, item.VY, item.VZ})
 	}
 
-	// Tick mob entities: gravity, physics, and optional AI
 	type movedMob struct {
 		entityID   int32
 		x, y, z    float64
+		vx, vy, vz float64
 		yaw, pitch float32
 		onGround   bool
 	}
 	var movedMobs []movedMob
 
 	for _, mob := range s.mobEntities {
-		// Run AI if present
+		const mobWidth = 0.6
+		const mobHeight = 1.8
+
 		if mob.AIFunc != nil {
 			mob.AIFunc(mob, s)
 		}
 
-		if mob.VX == 0 && mob.VY == 0 && mob.VZ == 0 {
-			blockBelow := s.world.GetBlock(int32(math.Floor(mob.X)), int32(math.Floor(mob.Y-0.1)), int32(math.Floor(mob.Z)))
-			if blockBelow>>4 != 0 {
-				mob.OnGround = true
-				continue
-			}
-			mob.OnGround = false
-		}
+		blockAtMob := s.world.GetBlock(int32(math.Floor(mob.X)), int32(math.Floor(mob.Y)), int32(math.Floor(mob.Z)))
+		mobCenterID := blockAtMob >> 4
+		mobInWater := mobCenterID == 8 || mobCenterID == 9
+		mobInLava := mobCenterID == 10 || mobCenterID == 11
 
-		// Apply gravity
-		mob.VY -= gravity
-
-		// Apply drag
-		mob.VX *= drag
-		mob.VY *= drag
-		mob.VZ *= drag
-
-		newX := mob.X + mob.VX
-		newY := mob.Y + mob.VY
-		newZ := mob.Z + mob.VZ
-
-		// Ground collision
-		blockAtNew := s.world.GetBlock(int32(math.Floor(newX)), int32(math.Floor(newY)), int32(math.Floor(newZ)))
-		if blockAtNew>>4 != 0 {
-			newY = math.Floor(newY) + 1.0
-			mob.VY = 0
-			mob.VX *= groundDrag
-			mob.VZ *= groundDrag
-			mob.OnGround = true
-
-			if math.Abs(mob.VX) < 0.001 {
-				mob.VX = 0
-			}
-			if math.Abs(mob.VZ) < 0.001 {
-				mob.VZ = 0
-			}
+		if mobInWater || mobInLava {
+			mob.VY += 0.05
+			mob.VX *= 0.8
+			mob.VY *= 0.8
+			mob.VZ *= 0.8
 		} else {
-			mob.OnGround = false
+			mob.VY -= gravity
 		}
 
-		mob.X = newX
-		mob.Y = newY
-		mob.Z = newZ
+		// X
+		if !s.checkEntityCollision(mob.X+mob.VX, mob.Y, mob.Z, mobWidth, mobHeight) {
+			mob.X += mob.VX
+		} else {
+			mob.VX = 0
+		}
 
-		movedMobs = append(movedMobs, movedMob{mob.EntityID, mob.X, mob.Y, mob.Z, mob.Yaw, mob.Pitch, mob.OnGround})
+		// Y
+		mob.OnGround = false
+		if !s.checkEntityCollision(mob.X, mob.Y+mob.VY, mob.Z, mobWidth, mobHeight) {
+			mob.Y += mob.VY
+		} else {
+			if mob.VY < 0 {
+				mob.OnGround = true
+				if !mobInWater && !mobInLava {
+					mob.Y = math.Floor(mob.Y)
+				}
+			}
+			if mobInWater || mobInLava {
+				mob.VY = 0
+			} else {
+				mob.VY = 0
+			}
+		}
+
+		// Z
+		if !s.checkEntityCollision(mob.X, mob.Y, mob.Z+mob.VZ, mobWidth, mobHeight) {
+			mob.Z += mob.VZ
+		} else {
+			mob.VZ = 0
+		}
+
+		f := drag
+		if mob.OnGround {
+			f = groundDrag
+		}
+		mob.VX *= f
+		mob.VY *= drag
+		mob.VZ *= f
+
+		if math.Abs(mob.VX) < 0.001 {
+			mob.VX = 0
+		}
+		if math.Abs(mob.VY) < 0.001 {
+			mob.VY = 0
+		}
+		if math.Abs(mob.VZ) < 0.001 {
+			mob.VZ = 0
+		}
+
+		movedMobs = append(movedMobs, movedMob{mob.EntityID, mob.X, mob.Y, mob.Z, mob.VX, mob.VY, mob.VZ, mob.Yaw, mob.Pitch, mob.OnGround})
 	}
 
 	s.mu.Unlock()
 
-	// Broadcast entity teleport packets
 	for _, m := range movedItems {
 		s.broadcastEntityTeleportByID(m.entityID, m.x, m.y, m.z, 0, 0, true)
+		s.broadcastEntityVelocity(m.entityID, m.vx, m.vy, m.vz)
 	}
 	for _, m := range movedMobs {
 		s.broadcastEntityTeleportByID(m.entityID, m.x, m.y, m.z, m.yaw, m.pitch, m.onGround)
+		s.broadcastEntityVelocity(m.entityID, m.vx, m.vy, m.vz)
 	}
 }
 
@@ -304,7 +429,12 @@ func (s *Server) spawnEntitiesForPlayer(player *Player) {
 	defer s.mu.RUnlock()
 
 	for _, entity := range s.entities {
-		s.sendItemToPlayer(player, entity)
+		if s.shouldTrack(player, entity.X, entity.Y, entity.Z) {
+			s.sendItemToPlayer(player, entity)
+			player.mu.Lock()
+			player.trackedEntities[entity.EntityID] = true
+			player.mu.Unlock()
+		}
 	}
 }
 
@@ -332,8 +462,10 @@ func (s *Server) sendItemToPlayer(player *Player, item *ItemEntity) {
 	})
 
 	player.mu.Lock()
-	protocol.WritePacket(player.Conn, spawnObj)
-	protocol.WritePacket(player.Conn, metadata)
+	if player.Conn != nil {
+		protocol.WritePacket(player.Conn, spawnObj)
+		protocol.WritePacket(player.Conn, metadata)
+	}
 	player.mu.Unlock()
 }
 
@@ -342,7 +474,12 @@ func (s *Server) spawnMobEntitiesForPlayer(player *Player) {
 	defer s.mu.RUnlock()
 
 	for _, mob := range s.mobEntities {
-		s.sendMobToPlayer(player, mob)
+		if s.shouldTrack(player, mob.X, mob.Y, mob.Z) {
+			s.sendMobToPlayer(player, mob)
+			player.mu.Lock()
+			player.trackedEntities[mob.EntityID] = true
+			player.mu.Unlock()
+		}
 	}
 }
 
@@ -387,7 +524,7 @@ func (s *Server) broadcastCollectItem(collectedID, collectorID int32) {
 }
 
 func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -417,8 +554,8 @@ func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
 			}
 
 			for _, e := range entities {
-				// Skip recently spawned items (1 second pickup delay)
-				if time.Since(e.SpawnTime) < 1*time.Second {
+				// Skip recently spawned items (0.75 second pickup delay)
+				if time.Since(e.SpawnTime) < 750*time.Millisecond {
 					continue
 				}
 
@@ -427,7 +564,7 @@ func (s *Server) itemPickupLoop(player *Player, stop chan struct{}) {
 				dz := e.Z - pz
 				distSq := dx*dx + dy*dy + dz*dz
 
-				if distSq < 4.0 { // 2.0 blocks range
+				if distSq < 6.25 { // 2.5 blocks range
 					// Try to pick up
 					player.mu.Lock()
 					slotIndex, ok := addItemToInventory(player, e.ItemID, e.Damage, e.Count)

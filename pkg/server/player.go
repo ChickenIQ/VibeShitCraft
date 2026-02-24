@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"net"
 	"sync"
@@ -46,6 +47,7 @@ type Player struct {
 	NoClip           bool    // True when in spectator mode (can pass through blocks)
 	DragSlots        []int16 // Slots being dragged over in mode 5
 	DragButton       int     // 0=left drag, 1=right drag
+	trackedEntities  map[int32]bool
 	mu               sync.Mutex
 }
 
@@ -70,21 +72,22 @@ func (s *Server) handleLoginStart(conn net.Conn, pkt *protocol.Packet) (*Player,
 	spawnY := float64(s.world.Gen.SurfaceHeight(8, 8)) + 1.0
 
 	player := &Player{
-		EntityID: eid,
-		Username: username,
-		UUID:     uuid,
-		Conn:     conn,
-		State:    protocol.StatePlay,
-		GameMode: s.config.DefaultGameMode,
-		X:        8,
-		Y:        spawnY,
-		Z:        8,
-		Yaw:      0,
-		Pitch:    0,
-		OnGround: true,
-		Health:   20.0,
-		IsDead:   false,
-		NoClip:   s.config.DefaultGameMode == GameModeSpectator,
+		EntityID:        eid,
+		Username:        username,
+		UUID:            uuid,
+		Conn:            conn,
+		State:           protocol.StatePlay,
+		GameMode:        s.config.DefaultGameMode,
+		X:               8,
+		Y:               spawnY,
+		Z:               8,
+		Yaw:             0,
+		Pitch:           0,
+		OnGround:        true,
+		Health:          20.0,
+		IsDead:          false,
+		NoClip:          s.config.DefaultGameMode == GameModeSpectator,
+		trackedEntities: make(map[int32]bool),
 	}
 
 	// Initialize all inventory slots as empty
@@ -148,9 +151,6 @@ func (s *Server) handlePlay(player *Player) {
 	// Send chunks around player
 	s.sendSpawnChunks(player)
 
-	// Send any block modifications to the new player
-	s.sendBlockModifications(conn)
-
 	// Register player
 	s.mu.Lock()
 	s.players[player.EntityID] = player
@@ -173,10 +173,15 @@ func (s *Server) handlePlay(player *Player) {
 	stopPickup := make(chan struct{})
 	go s.itemPickupLoop(player, stopPickup)
 
+	// Start environment loop
+	stopEnv := make(chan struct{})
+	go s.environmentLoop(player, stopEnv)
+
 	defer func() {
 		close(stopKeepAlive)
 		close(stopRegen)
 		close(stopPickup)
+		close(stopEnv)
 		// Remove from tab list before removing from players map
 		s.broadcastPlayerListRemove(player.UUID)
 		s.mu.Lock()
@@ -272,6 +277,47 @@ func (s *Server) regenerationLoop(player *Player, stop chan struct{}) {
 	}
 }
 
+func (s *Server) environmentLoop(player *Player, stop chan struct{}) {
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return
+		case <-ticker.C:
+			// Fast check without locking player
+			if !s.GameRuleBool("acidWater") {
+				continue
+			}
+
+			player.mu.Lock()
+			if player.IsDead || player.GameMode == GameModeCreative || player.GameMode == GameModeSpectator {
+				player.mu.Unlock()
+				continue
+			}
+
+			x, y, z := player.X, player.Y, player.Z
+			player.mu.Unlock()
+
+			bx := int32(math.Floor(x))
+			byFeet := int32(math.Floor(y))
+			byHead := int32(math.Floor(y + 1))
+			bz := int32(math.Floor(z))
+
+			blockFeet := s.world.GetBlock(bx, byFeet, bz) >> 4
+			blockHead := s.world.GetBlock(bx, byHead, bz) >> 4
+
+			if blockFeet == 8 || blockFeet == 9 || blockHead == 8 || blockHead == 9 {
+				damage := s.GameRuleFloat("acidWaterDamage")
+				if damage > 0 {
+					s.applyDamage(player, damage, "melted in acid water")
+				}
+			}
+		}
+	}
+}
+
 func offlineUUID(username string) [16]byte {
 	// Simple offline UUID generation (MD5 of "OfflinePlayer:" + username)
 	// For simplicity, we'll use a deterministic hash
@@ -318,5 +364,3 @@ func formatUUID(uuid [16]byte) string {
 	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
 		uuid[0:4], uuid[4:6], uuid[6:8], uuid[8:10], uuid[10:16])
 }
-
-

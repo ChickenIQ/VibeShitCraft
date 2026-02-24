@@ -26,6 +26,8 @@ func (s *Server) handleCommand(player *Player, message string) {
 		s.handleGamemodeCommand(player, parts[1:])
 	case "/tp", "/teleport":
 		s.handleTpCommand(player, parts[1:])
+	case "/gamerule":
+		s.handleGameruleCommand(player, parts[1:])
 	case "/stop":
 		s.handleStopCommand(player)
 	default:
@@ -149,7 +151,9 @@ func (s *Server) teleportPlayer(player *Player, x, y, z float64) {
 		protocol.WriteByte(w, 0) // Flags (all absolute)
 	})
 	player.mu.Lock()
-	protocol.WritePacket(player.Conn, posLook)
+	if player.Conn != nil {
+		protocol.WritePacket(player.Conn, posLook)
+	}
 	player.mu.Unlock()
 
 	// Broadcast teleport to other players
@@ -157,6 +161,9 @@ func (s *Server) teleportPlayer(player *Player, x, y, z float64) {
 
 	// Load/unload chunks around new position
 	s.sendChunkUpdates(player)
+
+	// Update entity tracking at destination
+	s.updateEntityTracking(player)
 }
 
 // handleStopCommand handles the /stop command.
@@ -170,4 +177,127 @@ func (s *Server) handleStopCommand(player *Player) {
 		time.Sleep(500 * time.Millisecond)
 		s.Stop()
 	}()
+}
+
+// handleGameruleCommand handles the /gamerule command.
+func (s *Server) handleGameruleCommand(player *Player, args []string) {
+	if len(args) == 0 {
+		s.mu.RLock()
+		var rules []string
+		for k := range s.gamerules {
+			rules = append(rules, k)
+		}
+		s.mu.RUnlock()
+		s.sendChatToPlayer(player, chat.Colored("Gamerules: "+strings.Join(rules, ", "), "gray"))
+		return
+	}
+
+	rule := args[0]
+	if len(args) == 1 {
+		s.mu.RLock()
+		val, ok := s.gamerules[rule]
+		s.mu.RUnlock()
+		if !ok {
+			s.sendChatToPlayer(player, chat.Colored("Unknown gamerule: "+rule, "red"))
+		} else {
+			s.sendChatToPlayer(player, chat.Colored(rule+" = "+val, "gray"))
+		}
+		return
+	}
+
+	val := args[1]
+
+	s.mu.Lock()
+	if _, ok := s.gamerules[rule]; !ok {
+		s.mu.Unlock()
+		s.sendChatToPlayer(player, chat.Colored("Unknown gamerule: "+rule, "red"))
+		return
+	}
+	s.gamerules[rule] = val
+	s.mu.Unlock()
+
+	msg := fmt.Sprintf("Gamerule %s updated to %s", rule, val)
+	log.Printf("Player %s: %s", player.Username, msg)
+	s.broadcastChat(chat.Colored(msg, "gray"))
+}
+
+// handleTabComplete handles Serverbound packet 0x14 for command tab completion.
+func (s *Server) handleTabComplete(player *Player, text string) {
+	text = strings.TrimPrefix(text, "/")
+	parts := strings.Split(text, " ")
+
+	var matches []string
+
+	if len(parts) == 1 {
+		// Command name completion
+		cmds := []string{"gamemode", "tp", "gamerule", "stop"}
+		prefix := strings.ToLower(parts[0])
+		for _, cmd := range cmds {
+			if strings.HasPrefix(cmd, prefix) {
+				matches = append(matches, "/"+cmd)
+			}
+		}
+	} else if len(parts) > 1 {
+		// Argument completion
+		cmd := strings.ToLower(parts[0])
+		prefix := strings.ToLower(parts[len(parts)-1])
+
+		switch cmd {
+		case "gamemode", "gm":
+			if len(parts) == 2 {
+				modes := []string{"survival", "creative", "adventure", "spectator"}
+				for _, mode := range modes {
+					if strings.HasPrefix(mode, prefix) {
+						matches = append(matches, mode)
+					}
+				}
+			}
+		case "tp", "teleport":
+			if len(parts) == 2 {
+				s.mu.RLock()
+				for _, p := range s.players {
+					name := p.Username
+					if strings.HasPrefix(strings.ToLower(name), prefix) {
+						matches = append(matches, name)
+					}
+				}
+				s.mu.RUnlock()
+			}
+		case "gamerule":
+			if len(parts) == 2 {
+				s.mu.RLock()
+				for rule := range s.gamerules {
+					if strings.HasPrefix(strings.ToLower(rule), prefix) {
+						matches = append(matches, rule)
+					}
+				}
+				s.mu.RUnlock()
+			} else if len(parts) == 3 {
+				ruleName := parts[1]
+				s.mu.RLock()
+				var currentVal string
+				for k, v := range s.gamerules {
+					if strings.EqualFold(k, ruleName) {
+						currentVal = v
+						break
+					}
+				}
+				s.mu.RUnlock()
+
+				// Only suggest true/false if the rule is currently a boolean
+				if currentVal == "true" || currentVal == "false" {
+					opts := []string{"true", "false"}
+					for _, opt := range opts {
+						if strings.HasPrefix(opt, prefix) {
+							matches = append(matches, opt)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if len(matches) > 0 {
+		s.sendTabComplete(player, matches)
+	}
 }

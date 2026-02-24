@@ -43,11 +43,13 @@ func (s *Server) broadcastBlockChange(x, y, z int32, blockState uint16) {
 		protocol.WriteVarInt(w, int32(blockState))
 	})
 
+	pos := ChunkPos{x >> 4, z >> 4}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, p := range s.players {
 		p.mu.Lock()
-		if p.Conn != nil {
+		if p.Conn != nil && p.loadedChunks[pos] {
 			protocol.WritePacket(p.Conn, pkt)
 		}
 		p.mu.Unlock()
@@ -57,6 +59,14 @@ func (s *Server) broadcastBlockChange(x, y, z int32, blockState uint16) {
 func (s *Server) broadcastBlockBreakEffect(breaker *Player, x, y, z int32, blockState uint16) {
 	blockID := blockState >> 4
 	metadata := blockState & 0x0F
+
+	// Wheat crops (59) with metadata > 0 can cause weird particle colors (like emerald blocks)
+	// when broken by other players, due to how the 1.8 client handles Effect 2001.
+	// To fix this, we strip the metadata for crops.
+	if blockID == 59 {
+		metadata = 0
+	}
+
 	effectData := int32(blockID) | (int32(metadata) << 12)
 
 	pkt := protocol.MarshalPacket(0x28, func(w *bytes.Buffer) {
@@ -66,6 +76,8 @@ func (s *Server) broadcastBlockBreakEffect(breaker *Player, x, y, z int32, block
 		protocol.WriteBool(w, false) // Disable relative volume
 	})
 
+	pos := ChunkPos{x >> 4, z >> 4}
+
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, p := range s.players {
@@ -73,7 +85,7 @@ func (s *Server) broadcastBlockBreakEffect(breaker *Player, x, y, z int32, block
 			continue // Breaking player already sees the effect client-side
 		}
 		p.mu.Lock()
-		if p.Conn != nil {
+		if p.Conn != nil && p.loadedChunks[pos] {
 			protocol.WritePacket(p.Conn, pkt)
 		}
 		p.mu.Unlock()
@@ -95,7 +107,26 @@ func (s *Server) broadcastEntityTeleportByID(entityID int32, x, y, z float64, ya
 	defer s.mu.RUnlock()
 	for _, p := range s.players {
 		p.mu.Lock()
-		if p.Conn != nil {
+		if p.Conn != nil && p.trackedEntities[entityID] {
+			protocol.WritePacket(p.Conn, pkt)
+		}
+		p.mu.Unlock()
+	}
+}
+
+func (s *Server) broadcastEntityVelocity(entityID int32, vx, vy, vz float64) {
+	pkt := protocol.MarshalPacket(0x12, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, entityID)
+		protocol.WriteInt16(w, int16(vx*8000))
+		protocol.WriteInt16(w, int16(vy*8000))
+		protocol.WriteInt16(w, int16(vz*8000))
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		p.mu.Lock()
+		if p.Conn != nil && p.trackedEntities[entityID] {
 			protocol.WritePacket(p.Conn, pkt)
 		}
 		p.mu.Unlock()
@@ -104,6 +135,7 @@ func (s *Server) broadcastEntityTeleportByID(entityID int32, x, y, z float64, ya
 
 func (s *Server) broadcastEntityTeleport(player *Player) {
 	player.mu.Lock()
+	entityID := player.EntityID
 	x := player.X
 	y := player.Y
 	z := player.Z
@@ -113,7 +145,7 @@ func (s *Server) broadcastEntityTeleport(player *Player) {
 	player.mu.Unlock()
 
 	pkt := protocol.MarshalPacket(0x18, func(w *bytes.Buffer) {
-		protocol.WriteVarInt(w, player.EntityID)
+		protocol.WriteVarInt(w, entityID)
 		protocol.WriteInt32(w, int32(x*32))
 		protocol.WriteInt32(w, int32(y*32))
 		protocol.WriteInt32(w, int32(z*32))
@@ -125,61 +157,72 @@ func (s *Server) broadcastEntityTeleport(player *Player) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, other := range s.players {
-		if other.EntityID == player.EntityID {
+		if other.EntityID == entityID {
 			continue
 		}
 		other.mu.Lock()
-		protocol.WritePacket(other.Conn, pkt)
+		if other.trackedEntities[entityID] {
+			protocol.WritePacket(other.Conn, pkt)
+		}
 		other.mu.Unlock()
 	}
 }
 
 func (s *Server) broadcastEntityLook(player *Player) {
 	player.mu.Lock()
+	entityID := player.EntityID
 	yaw := player.Yaw
 	pitch := player.Pitch
 	onGround := player.OnGround
 	player.mu.Unlock()
 
 	pkt := protocol.MarshalPacket(0x16, func(w *bytes.Buffer) {
-		protocol.WriteVarInt(w, player.EntityID)
+		protocol.WriteVarInt(w, entityID)
 		protocol.WriteByte(w, byte(yaw*256/360))
 		protocol.WriteByte(w, byte(pitch*256/360))
 		protocol.WriteBool(w, onGround)
 	})
 
 	headRotation := protocol.MarshalPacket(0x19, func(w *bytes.Buffer) {
-		protocol.WriteVarInt(w, player.EntityID)
+		protocol.WriteVarInt(w, entityID)
 		protocol.WriteByte(w, byte(yaw*256/360))
 	})
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, other := range s.players {
-		if other.EntityID == player.EntityID {
+		if other.EntityID == entityID {
 			continue
 		}
 		other.mu.Lock()
-		protocol.WritePacket(other.Conn, pkt)
-		protocol.WritePacket(other.Conn, headRotation)
+		if other.trackedEntities[entityID] {
+			protocol.WritePacket(other.Conn, pkt)
+			protocol.WritePacket(other.Conn, headRotation)
+		}
 		other.mu.Unlock()
 	}
 }
 
 func (s *Server) broadcastAnimation(player *Player, animationID byte) {
+	player.mu.Lock()
+	entityID := player.EntityID
+	player.mu.Unlock()
+
 	pkt := protocol.MarshalPacket(0x0B, func(w *bytes.Buffer) {
-		protocol.WriteVarInt(w, player.EntityID)
+		protocol.WriteVarInt(w, entityID)
 		protocol.WriteByte(w, animationID)
 	})
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, other := range s.players {
-		if other.EntityID == player.EntityID {
+		if other.EntityID == entityID {
 			continue
 		}
 		other.mu.Lock()
-		protocol.WritePacket(other.Conn, pkt)
+		if other.trackedEntities[entityID] {
+			protocol.WritePacket(other.Conn, pkt)
+		}
 		other.mu.Unlock()
 	}
 }
@@ -195,7 +238,10 @@ func (s *Server) broadcastDestroyEntity(entityID int32) {
 	for _, p := range s.players {
 		p.mu.Lock()
 		if p.Conn != nil {
-			protocol.WritePacket(p.Conn, pkt)
+			if p.trackedEntities[entityID] {
+				protocol.WritePacket(p.Conn, pkt)
+			}
+			delete(p.trackedEntities, entityID)
 		}
 		p.mu.Unlock()
 	}
@@ -211,7 +257,7 @@ func (s *Server) broadcastEntityStatus(entityID int32, status byte) {
 	defer s.mu.RUnlock()
 	for _, p := range s.players {
 		p.mu.Lock()
-		if p.Conn != nil {
+		if p.Conn != nil && p.trackedEntities[entityID] {
 			protocol.WritePacket(p.Conn, pkt)
 		}
 		p.mu.Unlock()
@@ -225,11 +271,13 @@ func (s *Server) broadcastHeldItem(player *Player) {
 	entityID := player.EntityID
 	activeSlot := int(player.ActiveSlot)
 	slotIndex := 36 + activeSlot
-	if activeSlot < 0 || slotIndex < 0 || slotIndex >= len(player.Inventory) {
+	var slot Slot
+	if activeSlot >= 0 && slotIndex >= 0 && slotIndex < len(player.Inventory) {
+		slot = player.Inventory[slotIndex]
+	} else {
 		player.mu.Unlock()
 		return
 	}
-	slot := player.Inventory[slotIndex]
 	player.mu.Unlock()
 
 	pkt := protocol.MarshalPacket(0x04, func(w *bytes.Buffer) {
@@ -246,7 +294,7 @@ func (s *Server) broadcastHeldItem(player *Player) {
 			continue
 		}
 		other.mu.Lock()
-		if other.Conn != nil {
+		if other.Conn != nil && other.trackedEntities[entityID] {
 			protocol.WritePacket(other.Conn, pkt)
 		}
 		other.mu.Unlock()
@@ -277,11 +325,21 @@ func (s *Server) spawnPlayerForOthers(player *Player) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	player.mu.Lock()
+	px, py, pz := player.X, player.Y, player.Z
+	eid := player.EntityID
+	player.mu.Unlock()
+
 	for _, other := range s.players {
-		if other.EntityID == player.EntityID {
+		if other.EntityID == eid {
 			continue
 		}
-		s.sendSpawnPlayer(other, player)
+		if s.shouldTrack(other, px, py, pz) {
+			s.sendSpawnPlayer(other, player)
+			other.mu.Lock()
+			other.trackedEntities[eid] = true
+			other.mu.Unlock()
+		}
 	}
 }
 
@@ -293,7 +351,17 @@ func (s *Server) spawnOthersForPlayer(player *Player) {
 		if other.EntityID == player.EntityID {
 			continue
 		}
-		s.sendSpawnPlayer(player, other)
+		other.mu.Lock()
+		ox, oy, oz := other.X, other.Y, other.Z
+		oeid := other.EntityID
+		other.mu.Unlock()
+
+		if s.shouldTrack(player, ox, oy, oz) {
+			s.sendSpawnPlayer(player, other)
+			player.mu.Lock()
+			player.trackedEntities[oeid] = true
+			player.mu.Unlock()
+		}
 	}
 }
 
@@ -330,7 +398,9 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 		protocol.WriteBool(w, false)                    // Has display name
 	})
 	viewer.mu.Lock()
-	protocol.WritePacket(viewer.Conn, playerListAdd)
+	if viewer.Conn != nil {
+		protocol.WritePacket(viewer.Conn, playerListAdd)
+	}
 	viewer.mu.Unlock()
 
 	// Entity flags: set invisible for spectators
@@ -358,6 +428,136 @@ func (s *Server) sendSpawnPlayer(viewer *Player, target *Player) {
 		protocol.WriteByte(w, 0x7F)        // Metadata terminator
 	})
 	viewer.mu.Lock()
-	protocol.WritePacket(viewer.Conn, spawnPlayer)
+	if viewer.Conn != nil {
+		protocol.WritePacket(viewer.Conn, spawnPlayer)
+	}
 	viewer.mu.Unlock()
+}
+
+func (s *Server) sendTabComplete(player *Player, matches []string) {
+	pkt := protocol.MarshalPacket(0x3A, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, int32(len(matches)))
+		for _, match := range matches {
+			protocol.WriteString(w, match)
+		}
+	})
+	player.mu.Lock()
+	if player.Conn != nil {
+		protocol.WritePacket(player.Conn, pkt)
+	}
+	player.mu.Unlock()
+}
+
+// shouldTrack returns true if the entity at (ex, ey, ez) should be visible to the viewer.
+func (s *Server) shouldTrack(viewer *Player, ex, ey, ez float64) bool {
+	viewer.mu.Lock()
+	vx, vy, vz := viewer.X, viewer.Y, viewer.Z
+	viewer.mu.Unlock()
+
+	dx := vx - ex
+	dy := vy - ey
+	dz := vz - ez
+	return (dx*dx + dy*dy + dz*dz) <= (EntityTrackingRange * EntityTrackingRange)
+}
+
+// updateEntityTracking updates which entities are visible to the given player.
+func (s *Server) updateEntityTracking(player *Player) {
+	s.mu.RLock()
+	players := make([]*Player, 0, len(s.players))
+	for _, p := range s.players {
+		players = append(players, p)
+	}
+	items := make([]*ItemEntity, 0, len(s.entities))
+	for _, e := range s.entities {
+		items = append(items, e)
+	}
+	mobs := make([]*MobEntity, 0, len(s.mobEntities))
+	for _, m := range s.mobEntities {
+		mobs = append(mobs, m)
+	}
+	s.mu.RUnlock()
+
+	// Check players
+	for _, other := range players {
+		if other.EntityID == player.EntityID {
+			continue
+		}
+
+		other.mu.Lock()
+		ox, oy, oz := other.X, other.Y, other.Z
+		oeid := other.EntityID
+		other.mu.Unlock()
+
+		player.mu.Lock()
+		tracking := player.trackedEntities[oeid]
+		player.mu.Unlock()
+
+		shouldTrack := s.shouldTrack(player, ox, oy, oz)
+
+		if shouldTrack && !tracking {
+			s.sendSpawnPlayer(player, other)
+			player.mu.Lock()
+			player.trackedEntities[oeid] = true
+			player.mu.Unlock()
+		} else if !shouldTrack && tracking {
+			s.sendDestroyEntity(player, oeid)
+			player.mu.Lock()
+			delete(player.trackedEntities, oeid)
+			player.mu.Unlock()
+		}
+	}
+
+	// Check items
+	for _, item := range items {
+		player.mu.Lock()
+		tracking := player.trackedEntities[item.EntityID]
+		player.mu.Unlock()
+
+		shouldTrack := s.shouldTrack(player, item.X, item.Y, item.Z)
+
+		if shouldTrack && !tracking {
+			s.sendItemToPlayer(player, item)
+			player.mu.Lock()
+			player.trackedEntities[item.EntityID] = true
+			player.mu.Unlock()
+		} else if !shouldTrack && tracking {
+			s.sendDestroyEntity(player, item.EntityID)
+			player.mu.Lock()
+			delete(player.trackedEntities, item.EntityID)
+			player.mu.Unlock()
+		}
+	}
+
+	// Check mobs
+	for _, mob := range mobs {
+		player.mu.Lock()
+		tracking := player.trackedEntities[mob.EntityID]
+		player.mu.Unlock()
+
+		shouldTrack := s.shouldTrack(player, mob.X, mob.Y, mob.Z)
+
+		if shouldTrack && !tracking {
+			s.sendMobToPlayer(player, mob)
+			player.mu.Lock()
+			player.trackedEntities[mob.EntityID] = true
+			player.mu.Unlock()
+		} else if !shouldTrack && tracking {
+			s.sendDestroyEntity(player, mob.EntityID)
+			player.mu.Lock()
+			delete(player.trackedEntities, mob.EntityID)
+			player.mu.Unlock()
+		}
+	}
+}
+
+func (s *Server) sendDestroyEntity(player *Player, entityID int32) {
+	pkt := protocol.MarshalPacket(0x13, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, 1) // Count
+		protocol.WriteVarInt(w, entityID)
+	})
+	player.mu.Lock()
+	if player.Conn != nil {
+		protocol.WritePacket(player.Conn, pkt)
+	}
+	player.mu.Unlock()
 }
