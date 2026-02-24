@@ -6,9 +6,9 @@ import (
 	"math"
 	"strings"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/chat"
-	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
-	"github.com/StoreStation/VibeShitCraft/pkg/world"
+	"github.com/VibeShit/VibeShitCraft/pkg/chat"
+	"github.com/VibeShit/VibeShitCraft/pkg/protocol"
+	"github.com/VibeShit/VibeShitCraft/pkg/world"
 )
 
 func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {

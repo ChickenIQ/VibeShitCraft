@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/chat"
-	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
+	"github.com/VibeShit/VibeShitCraft/pkg/chat"
+	"github.com/VibeShit/VibeShitCraft/pkg/protocol"
 )
 
 // Slot represents an inventory slot.

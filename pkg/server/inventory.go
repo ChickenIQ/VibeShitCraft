@@ -5,7 +5,7 @@ import (
 	"log"
 	"math"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
+	"github.com/VibeShit/VibeShitCraft/pkg/protocol"
 )
 
 // addItemToInventory finds a suitable slot and adds the item to the player's inventory.

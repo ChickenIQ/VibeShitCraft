@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
-	"github.com/StoreStation/VibeShitCraft/pkg/world"
+	"github.com/VibeShit/VibeShitCraft/pkg/protocol"
+	"github.com/VibeShit/VibeShitCraft/pkg/world"
 )
 
 const DefaultSeed = 0

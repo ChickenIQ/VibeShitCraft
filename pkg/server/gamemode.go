@@ -6,7 +6,7 @@ import (
 	"log"
 	"strings"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
+	"github.com/VibeShit/VibeShitCraft/pkg/protocol"
 )
 
 // Gamemode constants matching Minecraft protocol values.

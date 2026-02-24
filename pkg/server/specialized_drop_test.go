@@ -3,7 +3,7 @@ package server
 import (
 	"testing"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/world"
+	"github.com/VibeShit/VibeShitCraft/pkg/world"
 )
 
 func TestSpecializedDrops(t *testing.T) {

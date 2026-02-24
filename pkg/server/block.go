@@ -6,8 +6,8 @@ import (
 	"math"
 	"math/rand"
 
-	"github.com/StoreStation/VibeShitCraft/pkg/protocol"
-	"github.com/StoreStation/VibeShitCraft/pkg/world"
+	"github.com/VibeShit/VibeShitCraft/pkg/protocol"
+	"github.com/VibeShit/VibeShitCraft/pkg/world"
 )
 
 func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
