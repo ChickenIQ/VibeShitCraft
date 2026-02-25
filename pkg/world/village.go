@@ -211,6 +211,23 @@ func doorToAnchorChurch(doorX, doorZ, facing int) (int, int) {
 	return doorX, doorZ
 }
 
+// doorToAnchorMarketplace computes the anchor for the 13x13 marketplace.
+// The anchor is the minimum x,z corner. The "door" is the entry to the central cross-path.
+// facing 0: entry on +Z wall; facing 1: entry on -Z wall
+func doorToAnchorMarketplace(doorX, doorZ, facing int) (int, int) {
+	switch facing {
+	case 0: // entry at (hx+6, hz+12)
+		return doorX - 6, doorZ - 12
+	case 1: // entry at (hx+6, hz)
+		return doorX - 6, doorZ
+	case 2: // entry at (hx+12, hz+6)
+		return doorX - 12, doorZ - 6
+	case 3: // entry at (hx, hz+6)
+		return doorX, doorZ - 6
+	}
+	return doorX, doorZ
+}
+
 // roadSegment represents one axis-aligned road segment in the village road tree.
 // Roads branch off each other: each segment can have child branches that fork
 // perpendicular to the parent at some point along its length.
@@ -245,6 +262,7 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		waterSrc     = 9 << 4   // water (stationary)
 		torch        = 50 << 4  // torch
 		slab         = 44 << 4  // stone slab
+		oakSlab      = 126 << 4 // oak slab
 		oakStairs    = 53 << 4  // oak stairs
 		woodenDoor   = 64 << 4  // wooden door
 		farmland     = 60 << 4  // farmland
@@ -258,7 +276,6 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		dandelion    = 37 << 4  // dandelion flower
 		poppy        = 38 << 4  // poppy flower
 		goldBlock    = 41 << 4  // gold block (bell)
-		oakSlab      = 126 << 4 // oak slab
 		bed          = 26 << 4  // bed
 	)
 
@@ -599,11 +616,12 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 
 	type slotDecision struct {
 		site       buildingSite
-		structType int // 1=house, 2=hall, 3=church
+		structType int // 1=house, 2=hall, 3=church, 4=marketplace
 	}
 	var activeSlots []slotDecision
 	hasHall := false
 	hasChurch := false
+	hasMarket := false
 
 	// Collect road bounding boxes for building-vs-road collision
 	var roadBBs []bbox
@@ -644,10 +662,10 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		if !site.smallOnly {
 			if slotHash >= 90 && !hasHall {
 				structType = 2
-				hasHall = true
 			} else if slotHash >= 80 && !hasChurch {
 				structType = 3
-				hasChurch = true
+			} else if slotHash >= 70 && !hasMarket {
+				structType = 4
 			}
 		}
 
@@ -664,6 +682,9 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		case 3:
 			hx, hz := doorToAnchorChurch(doorX, doorZ, site.facing)
 			bx, bz, ex, ez = hx-1, hz-1, hx+6, hz+12
+		case 4:
+			hx, hz := doorToAnchorMarketplace(doorX, doorZ, site.facing)
+			bx, bz, ex, ez = hx-1, hz-1, hx+14, hz+14 // 13x13 footprint
 		}
 
 		// Check for collision with already-placed buildings AND road segments
@@ -688,6 +709,15 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		if collides {
 			fallbackSites = append(fallbackSites, site)
 			continue
+		}
+
+		// Mark unique buildings as spawned since they passed collision
+		if structType == 2 {
+			hasHall = true
+		} else if structType == 3 {
+			hasChurch = true
+		} else if structType == 4 {
+			hasMarket = true
 		}
 
 		placedBuildings = append(placedBuildings, newBB)
@@ -1015,31 +1045,35 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		case 3:
 			hx, hz := doorToAnchorChurch(doorX, doorZ, sd.site.facing)
 			v.buildChurch(hx, hz, surfY, sd.site.facing, placeBlock, log, planks, cobble, glass, torch, oakStairs, woodenDoor, slab, air, goldBlock)
+		case 4:
+			hx, hz := doorToAnchorMarketplace(doorX, doorZ, sd.site.facing)
+			v.buildMarketplace(hx, hz, surfY, sd.site.facing, placeBlock, log, fence, oakSlab, gravel, torch, air)
 		}
 
 		// Gravel path from door to nearest road point (3 blocks wide)
+		pathWidth := 1
 		switch sd.site.facing {
 		case 0:
 			for z := doorZ; z <= doorZ+6; z++ {
-				for w := -1; w <= 1; w++ {
+				for w := -pathWidth; w <= pathWidth; w++ {
 					placePath(doorX+w, surfY, z, gravel)
 				}
 			}
 		case 1:
 			for z := doorZ - 6; z <= doorZ; z++ {
-				for w := -1; w <= 1; w++ {
+				for w := -pathWidth; w <= pathWidth; w++ {
 					placePath(doorX+w, surfY, z, gravel)
 				}
 			}
 		case 2:
 			for x := doorX; x <= doorX+6; x++ {
-				for w := -1; w <= 1; w++ {
+				for w := -pathWidth; w <= pathWidth; w++ {
 					placePath(x, surfY, doorZ+w, gravel)
 				}
 			}
 		case 3:
 			for x := doorX - 6; x <= doorX; x++ {
-				for w := -1; w <= 1; w++ {
+				for w := -pathWidth; w <= pathWidth; w++ {
 					placePath(x, surfY, doorZ+w, gravel)
 				}
 			}
@@ -1115,6 +1149,101 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 
 	for i := range allSegments {
 		placeLamps(&allSegments[i])
+	}
+}
+
+// buildMarketplace creates a 13x13 open market with 4 log-and-slab stalls and a gravel cross in the middle.
+func (v *VillageGrid) buildMarketplace(hx, hz, surfY, facing int, place func(wx, y, wz int, state uint16), log, fence, oakSlab, gravel, torch, air uint16) {
+	// 13x13 bounding box. Clear footprint first.
+	for dx := 0; dx < 13; dx++ {
+		for dz := 0; dz < 13; dz++ {
+			for dy := 1; dy <= 4; dy++ {
+				place(hx+dx, surfY+dy, hz+dz, air)
+			}
+		}
+	}
+
+	// 1. Draw the gravel footprint
+	// Instead of a cross, draw a solid rectangle that covers the stalls and the center path.
+	if facing == 0 || facing == 1 {
+		// Vertical layout. Gravel from X=2..10, Z=0..12
+		for dx := 2; dx <= 10; dx++ {
+			for dz := 0; dz <= 12; dz++ {
+				place(hx+dx, surfY, hz+dz, gravel)
+			}
+		}
+	} else {
+		// Horizontal layout. Gravel from X=0..12, Z=2..10
+		for dx := 0; dx <= 12; dx++ {
+			for dz := 2; dz <= 10; dz++ {
+				place(hx+dx, surfY, hz+dz, gravel)
+			}
+		}
+	}
+
+	upperSlab := oakSlab | 8 // meta 8 to make it upper slab
+
+	// Function to generate a dynamic stall facing the specified axis
+	buildStall := func(startX, startZ, w, l, frontDx, frontDz int) {
+		for dx := 0; dx < w; dx++ {
+			for dz := 0; dz < l; dz++ {
+				// Logs at corners
+				isCorner := (dx == 0 || dx == w-1) && (dz == 0 || dz == l-1)
+
+				if isCorner {
+					place(hx+startX+dx, surfY+1, hz+startZ+dz, log)
+					place(hx+startX+dx, surfY+2, hz+startZ+dz, fence)
+					place(hx+startX+dx, surfY+3, hz+startZ+dz, fence)
+				}
+
+				// Roof (covers entire stall)
+				place(hx+startX+dx, surfY+4, hz+startZ+dz, oakSlab)
+
+				// Counter (upper slab). Forms a U-shape open at the back.
+				if !isCorner {
+					isFront := false
+					if frontDx >= 0 && dx == frontDx {
+						isFront = true
+					}
+					if frontDz >= 0 && dz == frontDz {
+						isFront = true
+					}
+
+					isEdge := false
+					if frontDx >= 0 { // Stall faces along X-axis
+						if dz == 0 || dz == l-1 {
+							isEdge = true
+						}
+					} else if frontDz >= 0 { // Stall faces along Z-axis
+						if dx == 0 || dx == w-1 {
+							isEdge = true
+						}
+					}
+
+					if isFront || isEdge {
+						place(hx+startX+dx, surfY+1, hz+startZ+dz, upperSlab)
+					}
+				}
+			}
+		}
+	}
+
+	if facing == 0 || facing == 1 {
+		// Main road enters along Z-axis. Center path is X=5..7.
+		// Stalls face the vertical path (X=5..7).
+		// Stalls are 3 wide (X) by 5 long (Z).
+		buildStall(2, 0, 3, 5, 2, -1) // Top-Left, front facing +X (dx=2)
+		buildStall(8, 0, 3, 5, 0, -1) // Top-Right, front facing -X (dx=0)
+		buildStall(2, 8, 3, 5, 2, -1) // Bottom-Left, front facing +X (dx=2)
+		buildStall(8, 8, 3, 5, 0, -1) // Bottom-Right, front facing -X (dx=0)
+	} else {
+		// Main road enters along X-axis. Center path is Z=5..7.
+		// Stalls face the horizontal path (Z=5..7).
+		// Stalls are 5 wide (X) by 3 long (Z).
+		buildStall(0, 2, 5, 3, -1, 2) // Top-Left, front facing +Z (dz=2)
+		buildStall(8, 2, 5, 3, -1, 2) // Top-Right, front facing +Z (dz=2)
+		buildStall(0, 8, 5, 3, -1, 0) // Bottom-Left, front facing -Z (dz=0)
+		buildStall(8, 8, 5, 3, -1, 0) // Bottom-Right, front facing -Z (dz=0)
 	}
 }
 
