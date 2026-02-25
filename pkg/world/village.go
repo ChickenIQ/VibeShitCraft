@@ -185,9 +185,8 @@ func divFloor(a, b int) int {
 }
 
 // generateVillage writes village structures into sections for chunk (chunkX, chunkZ).
-// surfY is the flat surface Y (the grass layer). All coordinates stay inside
-// the section array exactly like generateTrees does.
-func (v *VillageGrid) generateVillage(chunkX, chunkZ, surfY int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+// All coordinates stay inside the section array exactly like generateTrees does.
+func (v *VillageGrid) generateVillage(chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
 	// Chunk world-space bounds
 	minWX := chunkX * 16
 	minWZ := chunkZ * 16
@@ -211,6 +210,13 @@ func (v *VillageGrid) generateVillage(chunkX, chunkZ, surfY int, sections *[Sect
 			if !ok {
 				continue
 			}
+
+			// Determine surface height at village center to avoid floating/buried towns
+			surfY := v.heightFunc(vx, vz)
+			if surfY < WaterLevel {
+				surfY = WaterLevel // Don't build villages underwater
+			}
+
 			v.buildVillage(vx, vz, surfY, chunkX, chunkZ, sections)
 		}
 	}
