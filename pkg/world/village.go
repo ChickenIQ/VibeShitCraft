@@ -1,5 +1,7 @@
 package world
 
+import "sync"
+
 // VillageGrid handles deterministic village placement on a sparse grid.
 // Every VILLAGE_CELL_SIZE blocks in X and Z forms a grid cell; each cell
 // independently rolls whether it contains a village center.
@@ -55,6 +57,7 @@ type VillageGrid struct {
 	rainNoise  *Perlin
 	heightFunc func(x, z int) int
 
+	mu          sync.RWMutex
 	centerCache map[cellKey]centerResult
 	planCache   map[cellKey]*VillagePlan
 }
@@ -92,12 +95,19 @@ func (v *VillageGrid) cellHash(cx, cz, mod int64) int64 {
 // AND no neighboring village is too close (minimum 80 blocks apart).
 func (v *VillageGrid) villageCenter(cellX, cellZ int) (int, int, bool) {
 	key := cellKey{cellX, cellZ}
+	v.mu.RLock()
 	if res, ok := v.centerCache[key]; ok {
+		v.mu.RUnlock()
 		return res.wx, res.wz, res.ok
 	}
+	v.mu.RUnlock()
 
 	wx, wz, ok := v.calculateVillageCenter(cellX, cellZ)
+
+	v.mu.Lock()
 	v.centerCache[key] = centerResult{wx, wz, ok}
+	v.mu.Unlock()
+
 	return wx, wz, ok
 }
 
@@ -254,6 +264,81 @@ func (v *VillageGrid) IsInVillage(wx, wz int) bool {
 	return false
 }
 
+// ChunkInVillage returns true if the 16x16 chunk intersects any village structures.
+func (v *VillageGrid) ChunkInVillage(chunkX, chunkZ int) bool {
+	minWX := chunkX * 16
+	minWZ := chunkZ * 16
+	maxWX := minWX + 15
+	maxWZ := minWZ + 15
+
+	const searchRadius = 80
+	cellMinX := divFloor(minWX-searchRadius, villageCellSize)
+	cellMaxX := divFloor(maxWX+searchRadius, villageCellSize)
+	cellMinZ := divFloor(minWZ-searchRadius, villageCellSize)
+	cellMaxZ := divFloor(maxWZ+searchRadius, villageCellSize)
+
+	for cx := cellMinX; cx <= cellMaxX; cx++ {
+		for cz := cellMinZ; cz <= cellMaxZ; cz++ {
+			vx, vz, ok := v.villageCenter(cx, cz)
+			if !ok {
+				continue
+			}
+
+			plan := v.planVillage(vx, vz)
+
+			// 1. Check Buildings & Farms (proximity 4 blocks)
+			for _, b := range plan.Buildings {
+				if maxWX >= b.Box.minX-4 && minWX <= b.Box.maxX+4 &&
+					maxWZ >= b.Box.minZ-4 && minWZ <= b.Box.maxZ+4 {
+					return true
+				}
+			}
+			for _, f := range plan.Farms {
+				if maxWX >= f.Box.minX-4 && minWX <= f.Box.maxX+4 &&
+					maxWZ >= f.Box.minZ-4 && minWZ <= f.Box.maxZ+4 {
+					return true
+				}
+			}
+
+			// 2. Check Roads (proximity 4 blocks)
+			// For chunk box, just check the four corners and the center to be safe or use simple bounding box.
+			// Accurate intersection of AABB and road segments.
+			if v.isNearRoadChunk(minWX, minWZ, maxWX, maxWZ, plan.Roads, 4) {
+				return true
+			}
+
+			// 3. Check Well (at center, 4x4 + margin)
+			if maxWX >= vx-5 && minWX <= vx+4 && maxWZ >= vz-5 && minWZ <= vz+4 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isNearRoadChunk checks if any road segment overlaps the given chunk bounding box.
+func (v *VillageGrid) isNearRoadChunk(minWX, minWZ, maxWX, maxWZ int, segments []roadSegment, dist int) bool {
+	for _, seg := range segments {
+		minX, maxX := seg.sx, seg.ex
+		if minX > maxX {
+			minX, maxX = maxX, minX
+		}
+		minZ, maxZ := seg.sz, seg.ez
+		if minZ > maxZ {
+			minZ, maxZ = maxZ, minZ
+		}
+
+		if maxWX >= minX-dist && minWX <= maxX+dist && maxWZ >= minZ-dist && minWZ <= maxZ+dist {
+			return true
+		}
+
+		if v.isNearRoadChunk(minWX, minWZ, maxWX, maxWZ, seg.children, dist) {
+			return true
+		}
+	}
+	return false
+}
+
 // isNearRoad is a recursive helper to check if a point is near any road segment in the tree.
 func (v *VillageGrid) isNearRoad(wx, wz int, segments []roadSegment, dist int) bool {
 	abs := func(x int) int {
@@ -292,12 +377,19 @@ func (v *VillageGrid) isNearRoad(wx, wz int, segments []roadSegment, dist int) b
 // planVillage creates the layout of a village deterministically.
 func (v *VillageGrid) planVillage(vx, vz int) *VillagePlan {
 	key := cellKey{vx, vz}
+	v.mu.RLock()
 	if plan, ok := v.planCache[key]; ok {
+		v.mu.RUnlock()
 		return plan
 	}
+	v.mu.RUnlock()
 
 	plan := v.calculateVillagePlan(vx, vz)
+
+	v.mu.Lock()
 	v.planCache[key] = plan
+	v.mu.Unlock()
+
 	return plan
 }
 

@@ -198,7 +198,11 @@ func TestMobEntitiesForNewPlayer(t *testing.T) {
 	defer c1.Close()
 	defer c2.Close()
 
-	player := &Player{EntityID: 1, Username: "Tester", Conn: c1, GameMode: GameModeCreative}
+	player := &Player{
+		EntityID: 1, Username: "Tester", Conn: c1, GameMode: GameModeCreative,
+		X: 5.0, Y: 65.0, Z: 10.0,
+		trackedEntities: make(map[int32]bool),
+	}
 	s.players[player.EntityID] = player
 
 	// Pre-spawn some mobs
