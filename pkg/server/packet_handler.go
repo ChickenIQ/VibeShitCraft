@@ -47,10 +47,13 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		z, _ := protocol.ReadFloat64(r)
 		onGround, _ := protocol.ReadBool(r)
 		player.mu.Lock()
+		oldY := player.Y
+		wasOnGround := player.OnGround
 		player.X = x
 		player.Y = y
 		player.Z = z
 		player.OnGround = onGround
+		s.updateFallState(player, oldY, y, wasOnGround, onGround)
 		player.mu.Unlock()
 		s.broadcastEntityTeleport(player)
 		s.sendChunkUpdates(player)
@@ -74,12 +77,15 @@ func (s *Server) handlePlayPacket(player *Player, pkt *protocol.Packet) {
 		pitch, _ := protocol.ReadFloat32(r)
 		onGround, _ := protocol.ReadBool(r)
 		player.mu.Lock()
+		oldY := player.Y
+		wasOnGround := player.OnGround
 		player.X = x
 		player.Y = y
 		player.Z = z
 		player.Yaw = yaw
 		player.Pitch = pitch
 		player.OnGround = onGround
+		s.updateFallState(player, oldY, y, wasOnGround, onGround)
 		player.mu.Unlock()
 		s.broadcastEntityTeleport(player)
 		s.sendChunkUpdates(player)

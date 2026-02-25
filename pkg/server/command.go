@@ -139,6 +139,9 @@ func (s *Server) teleportPlayer(player *Player, x, y, z float64) {
 	player.X = x
 	player.Y = y
 	player.Z = z
+	// Reset fall tracking to avoid false fall damage after teleport
+	player.IsFalling = false
+	player.FallStartY = y
 	player.mu.Unlock()
 
 	// Send Player Position And Look to the teleported player
@@ -162,8 +165,22 @@ func (s *Server) teleportPlayer(player *Player, x, y, z float64) {
 	// Load/unload chunks around new position
 	s.sendChunkUpdates(player)
 
-	// Update entity tracking at destination
+	// Update entity tracking for the teleported player
 	s.updateEntityTracking(player)
+
+	// Update entity tracking for ALL other players so they properly
+	// spawn/despawn the teleported player based on new distance
+	s.mu.RLock()
+	var others []*Player
+	for _, p := range s.players {
+		if p.EntityID != player.EntityID {
+			others = append(others, p)
+		}
+	}
+	s.mu.RUnlock()
+	for _, other := range others {
+		s.updateEntityTracking(other)
+	}
 }
 
 // handleStopCommand handles the /stop command.
