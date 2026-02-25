@@ -2,7 +2,7 @@ package world
 
 // Biome describes terrain generation parameters for a biome.
 type Biome struct {
-	ID              byte    // Minecraft biome ID
+	ID              byte // Minecraft biome ID
 	Name            string
 	SurfaceBlock    uint16  // block state (blockID << 4 | meta)
 	FillerBlock     uint16  // block below surface
@@ -27,7 +27,7 @@ var (
 		SurfaceBlock: 2 << 4, // grass
 		FillerBlock:  3 << 4, // dirt
 		BaseHeight:   66, HeightVariation: 12,
-		TreeDensity: 0.006,
+		TreeDensity:    0.006,
 		BoulderDensity: 0.03,
 	}
 	BiomeDesert = &Biome{
@@ -35,7 +35,7 @@ var (
 		SurfaceBlock: 12 << 4, // sand
 		FillerBlock:  24 << 4, // sandstone
 		BaseHeight:   64, HeightVariation: 10,
-		TreeDensity: 0,
+		TreeDensity:    0,
 		BoulderDensity: 0.02, // desert rocks
 	}
 	BiomeExtremeHills = &Biome{
@@ -43,7 +43,7 @@ var (
 		SurfaceBlock: 2 << 4, // grass
 		FillerBlock:  1 << 4, // stone
 		BaseHeight:   72, HeightVariation: 50,
-		TreeDensity: 0.015,
+		TreeDensity:    0.015,
 		BoulderDensity: 0.08,
 	}
 	BiomeForest = &Biome{
@@ -51,7 +51,7 @@ var (
 		SurfaceBlock: 2 << 4, // grass
 		FillerBlock:  3 << 4, // dirt
 		BaseHeight:   68, HeightVariation: 14,
-		TreeDensity: 0.05,
+		TreeDensity:    0.05,
 		BoulderDensity: 0.04,
 	}
 	BiomeJungle = &Biome{
@@ -59,7 +59,7 @@ var (
 		SurfaceBlock: 2 << 4, // grass
 		FillerBlock:  3 << 4, // dirt
 		BaseHeight:   70, HeightVariation: 20,
-		TreeDensity: 0.12,
+		TreeDensity:    0.12,
 		BoulderDensity: 0.02,
 	}
 	BiomeDarkForest = &Biome{
@@ -67,7 +67,7 @@ var (
 		SurfaceBlock: 2 << 4, // grass
 		FillerBlock:  3 << 4, // dirt
 		BaseHeight:   68, HeightVariation: 10,
-		TreeDensity: 0.25,
+		TreeDensity:    0.25,
 		BoulderDensity: 0.02,
 	}
 	BiomeSnowyTundra = &Biome{
@@ -75,9 +75,9 @@ var (
 		SurfaceBlock: 80 << 4, // snow block
 		FillerBlock:  3 << 4,  // dirt
 		BaseHeight:   66, HeightVariation: 8,
-		TreeDensity: 0.004,
+		TreeDensity:    0.004,
 		BoulderDensity: 0.02,
-		HasSnow: true,
+		HasSnow:        true,
 	}
 )
 
@@ -102,8 +102,8 @@ func BiomeAt(tempNoise, rainNoise *Perlin, worldX, worldZ int) *Biome {
 	bx := float64(worldX) * scale
 	bz := float64(worldZ) * scale
 
-	temp := tempNoise.OctaveNoise2D(bx, bz, 4, 2.0, 0.5)  // −1..1
-	rain := rainNoise.OctaveNoise2D(bx+500, bz+500, 4, 2.0, 0.5)
+	temp := tempNoise.OctaveNoise2D(bx, bz, 2, 2.0, 0.3) // −1..1
+	rain := rainNoise.OctaveNoise2D(bx+500, bz+500, 2, 2.0, 0.3)
 
 	// Map to 0..1
 	temp = (temp + 1) / 2
