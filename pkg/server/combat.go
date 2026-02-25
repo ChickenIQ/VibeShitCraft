@@ -118,12 +118,14 @@ func (s *Server) handleRespawn(player *Player) {
 	// Reset health and state
 	player.Health = 20.0
 	player.IsDead = false
+	player.IsFalling = false
 
 	// Reset position to spawn (8, spawnY, 8)
 	spawnY := float64(s.world.Gen.SurfaceHeight(8, 8)) + 1.0
 	player.X = 8
 	player.Y = spawnY
 	player.Z = 8
+	player.FallStartY = spawnY
 	player.mu.Unlock()
 
 	// 0x07 Respawn packet
@@ -153,6 +155,21 @@ func (s *Server) handleRespawn(player *Player) {
 	// Update health
 	s.sendHealth(player)
 
+	// Sync full inventory to prevent desync after respawn
+	player.mu.Lock()
+	syncPkt := protocol.MarshalPacket(0x30, func(w *bytes.Buffer) {
+		protocol.WriteByte(w, 0)   // Window ID
+		protocol.WriteInt16(w, 45) // Count
+		for i := 0; i < 45; i++ {
+			slot := player.Inventory[i]
+			protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+		}
+	})
+	if player.Conn != nil {
+		protocol.WritePacket(player.Conn, syncPkt)
+	}
+	player.mu.Unlock()
+
 	// Re-spawn for others
 	s.broadcastDestroyEntity(player.EntityID)
 	s.spawnPlayerForOthers(player)
@@ -173,4 +190,47 @@ func (s *Server) sendHealth(player *Player) {
 	player.mu.Lock()
 	protocol.WritePacket(player.Conn, pkt)
 	player.mu.Unlock()
+}
+
+// updateFallState tracks fall distance and applies fall damage when landing.
+// Must be called with player.mu held.
+func (s *Server) updateFallState(player *Player, oldY, newY float64, wasOnGround, onGround bool) {
+	if player.GameMode == GameModeCreative || player.GameMode == GameModeSpectator {
+		player.IsFalling = false
+		return
+	}
+
+	// Check if the player is in water/lava (no fall damage)
+	bx := int32(math.Floor(player.X))
+	by := int32(math.Floor(newY))
+	bz := int32(math.Floor(player.Z))
+	block := s.world.GetBlock(bx, by, bz)
+	blockID := block >> 4
+	inLiquid := blockID == 8 || blockID == 9 || blockID == 10 || blockID == 11
+
+	if inLiquid {
+		player.IsFalling = false
+		return
+	}
+
+	if !wasOnGround && newY < oldY {
+		// Player is falling
+		if !player.IsFalling {
+			player.IsFalling = true
+			player.FallStartY = oldY
+		}
+	}
+
+	if onGround && player.IsFalling {
+		// Player just landed
+		fallDistance := player.FallStartY - newY
+		player.IsFalling = false
+
+		if fallDistance > 3.0 {
+			damage := float32(fallDistance - 3.0)
+			player.mu.Unlock()
+			s.applyDamage(player, damage, "fell from a high place")
+			player.mu.Lock()
+		}
+	}
 }

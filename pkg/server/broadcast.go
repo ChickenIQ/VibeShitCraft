@@ -321,6 +321,40 @@ func (s *Server) broadcastPlayerListRemove(uuid [16]byte) {
 	}
 }
 
+// broadcastPlayerListAdd sends a Player List Item (action=0, Add Player)
+// to all connected players, adding the target player to the tab list.
+func (s *Server) broadcastPlayerListAdd(player *Player) {
+	player.mu.Lock()
+	uuid := player.UUID
+	username := player.Username
+	gameMode := player.GameMode
+	player.mu.Unlock()
+
+	pkt := protocol.MarshalPacket(0x38, func(w *bytes.Buffer) {
+		protocol.WriteVarInt(w, 0) // Action: Add Player
+		protocol.WriteVarInt(w, 1) // Number of players
+		protocol.WriteUUID(w, uuid)
+		protocol.WriteString(w, username)
+		protocol.WriteVarInt(w, 0)                   // Number of properties
+		protocol.WriteVarInt(w, int32(gameMode))     // Gamemode
+		protocol.WriteVarInt(w, 0)                   // Ping
+		protocol.WriteBool(w, false)                 // Has display name
+	})
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, p := range s.players {
+		if p.EntityID == player.EntityID {
+			continue
+		}
+		p.mu.Lock()
+		if p.Conn != nil {
+			protocol.WritePacket(p.Conn, pkt)
+		}
+		p.mu.Unlock()
+	}
+}
+
 func (s *Server) spawnPlayerForOthers(player *Player) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
