@@ -40,18 +40,34 @@ type buildingSite struct {
 }
 
 // VillageGrid carries the world seed used for per-cell rolls.
+type cellKey struct {
+	x, z int
+}
+
+type centerResult struct {
+	wx, wz int
+	ok     bool
+}
+
 type VillageGrid struct {
-	seed      int64
-	tempNoise *Perlin
-	rainNoise *Perlin
+	seed       int64
+	tempNoise  *Perlin
+	rainNoise  *Perlin
+	heightFunc func(x, z int) int
+
+	centerCache map[cellKey]centerResult
+	planCache   map[cellKey]*VillagePlan
 }
 
 // NewVillageGrid creates a VillageGrid for the given world seed and biome noise.
-func NewVillageGrid(seed int64, tempNoise, rainNoise *Perlin) *VillageGrid {
+func NewVillageGrid(seed int64, tempNoise, rainNoise *Perlin, heightFunc func(x, z int) int) *VillageGrid {
 	return &VillageGrid{
-		seed:      seed,
-		tempNoise: tempNoise,
-		rainNoise: rainNoise,
+		seed:        seed,
+		tempNoise:   tempNoise,
+		rainNoise:   rainNoise,
+		heightFunc:  heightFunc,
+		centerCache: make(map[cellKey]centerResult),
+		planCache:   make(map[cellKey]*VillagePlan),
 	}
 }
 
@@ -74,7 +90,18 @@ func (v *VillageGrid) cellHash(cx, cz, mod int64) int64 {
 // villageCenter returns the world-space (x, z) center of a village in grid cell
 // (cellX, cellZ), and ok=true if that cell contains a village (25% chance)
 // AND no neighboring village is too close (minimum 80 blocks apart).
-func (v *VillageGrid) villageCenter(cellX, cellZ int) (wx, wz int, ok bool) {
+func (v *VillageGrid) villageCenter(cellX, cellZ int) (int, int, bool) {
+	key := cellKey{cellX, cellZ}
+	if res, ok := v.centerCache[key]; ok {
+		return res.wx, res.wz, res.ok
+	}
+
+	wx, wz, ok := v.calculateVillageCenter(cellX, cellZ)
+	v.centerCache[key] = centerResult{wx, wz, ok}
+	return wx, wz, ok
+}
+
+func (v *VillageGrid) calculateVillageCenter(cellX, cellZ int) (wx, wz int, ok bool) {
 	cx := int64(cellX)
 	cz := int64(cellZ)
 	// ~25% of cells get a village
@@ -118,6 +145,18 @@ func (v *VillageGrid) villageCenter(cellX, cellZ int) (wx, wz int, ok bool) {
 				// Too close — suppress the one with higher priority value
 				neighborPriority := v.cellHash(ncx^0x1234, ncz^0x5678, 1000)
 				if myPriority >= neighborPriority {
+					return 0, 0, false
+				}
+			}
+		}
+	}
+
+	// Check terrain height at center — don't build if overhanging water!
+	if v.heightFunc != nil {
+		// Check a 2-block radius around the center (well area)
+		for dx := -2; dx <= 2; dx++ {
+			for dz := -2; dz <= 2; dz++ {
+				if v.heightFunc(wx+dx, wz+dz) < 62 { // 62 is WaterLevel
 					return 0, 0, false
 				}
 			}
@@ -252,6 +291,17 @@ func (v *VillageGrid) isNearRoad(wx, wz int, segments []roadSegment, dist int) b
 
 // planVillage creates the layout of a village deterministically.
 func (v *VillageGrid) planVillage(vx, vz int) *VillagePlan {
+	key := cellKey{vx, vz}
+	if plan, ok := v.planCache[key]; ok {
+		return plan
+	}
+
+	plan := v.calculateVillagePlan(vx, vz)
+	v.planCache[key] = plan
+	return plan
+}
+
+func (v *VillageGrid) calculateVillagePlan(vx, vz int) *VillagePlan {
 	abs := func(x int) int {
 		if x < 0 {
 			return -x

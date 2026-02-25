@@ -35,7 +35,7 @@ func NewGenerator(seed int64) *Generator {
 		treeNoise:    NewPerlin(seed + 4),
 		boulderNoise: NewPerlin(seed + 200),
 	}
-	g.villageGen = NewVillageGrid(seed, g.tempNoise, g.rainNoise)
+	g.villageGen = NewVillageGrid(seed, g.tempNoise, g.rainNoise, g.SurfaceHeight)
 	g.lakeNoise = NewPerlin(seed + 300)
 	g.riverNoise = NewPerlin(seed + 400)
 	return g
@@ -43,27 +43,47 @@ func NewGenerator(seed int64) *Generator {
 
 // SurfaceHeight returns the solid surface Y for the given world-space x, z.
 func (g *Generator) SurfaceHeight(x, z int) int {
-	biome := BiomeAt(g.tempNoise, g.rainNoise, x, z)
+	// Biome Blending: sample biomes in a neighborhood to smooth transitions
+	// ------------------------------------------------------------------
+	var totalBase float64
+	var totalVar float64
+	var totalWeight float64
 
-	// Base height from biome
+	const radius = 4
+	const stride = 4 // Increased from 2 to 4 for 3x3 sampling
+
+	for dx := -radius; dx <= radius; dx += stride {
+		for dz := -radius; dz <= radius; dz += stride {
+			// Get biome at sample point
+			b := BiomeAt(g.tempNoise, g.rainNoise, x+dx, z+dz)
+
+			// Simple distance-based weight (closer points matter more)
+			// Using 1.0 for now for simple linear blending, but could be Gaussian
+			weight := 1.0
+			totalBase += float64(b.BaseHeight) * weight
+			totalVar += b.HeightVariation * weight
+			totalWeight += weight
+		}
+	}
+
+	blendedBase := totalBase / totalWeight
+	blendedVar := totalVar / totalWeight
+
+	// Base height noise
 	const noiseScale = 0.015
 	h := g.terrain.OctaveNoise2D(float64(x)*noiseScale, float64(z)*noiseScale, 3, 2.0, 0.5)
 
-	// Combine base height and variation
-	height := float64(biome.BaseHeight) + h*biome.HeightVariation
+	// Combine blended base height and variation
+	height := blendedBase + h*blendedVar
 
 	// 1. Rare Rivers (Ridged Noise)
 	// ------------------------------------------------------------------
-	// Use very low frequency for winding rivers
 	const riverScale = 0.003
 	rv := g.riverNoise.Noise2D(float64(x)*riverScale, float64(z)*riverScale)
-	rv = math.Abs(rv) // Ridge-like valley (0 = center of river)
+	rv = math.Abs(rv)
 
-	// Threshold for river width (very narrow for "rare" effect)
 	if rv < 0.04 {
-		// Deepen the terrain significantly
-		// Smooth transition to avoid sheer cliffs
-		factor := (0.04 - rv) / 0.04 // 0 to 1
+		factor := (0.04 - rv) / 0.04
 		depth := factor * 15.0
 		height -= depth
 	}
@@ -72,9 +92,8 @@ func (g *Generator) SurfaceHeight(x, z int) int {
 	// ------------------------------------------------------------------
 	const lakeScale = 0.01
 	lv := g.lakeNoise.Noise2D(float64(x)*lakeScale, float64(z)*lakeScale)
-	// Only carve lakes if noise is high (rare basins)
 	if lv > 0.82 {
-		factor := (lv - 0.82) / (1.0 - 0.82) // 0 to 1
+		factor := (lv - 0.82) / (1.0 - 0.82)
 		depth := factor * 12.0
 		height -= depth
 	}
@@ -148,7 +167,7 @@ func (g *Generator) BlockAt(x, y, z int) uint16 {
 }
 
 // generateTrees places various tree types based on biome.
-func (g *Generator) generateTrees(chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+func (g *Generator) generateTrees(chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16, heightCache *[16][16]int) {
 	for lx := 2; lx < 14; lx++ {
 		for lz := 2; lz < 14; lz++ {
 			wx := chunkX*16 + lx
@@ -159,8 +178,33 @@ func (g *Generator) generateTrees(chunkX, chunkZ int, sections *[SectionsPerChun
 				continue
 			}
 
-			surfaceY := g.SurfaceHeight(wx, wz)
-			if surfaceY > 240 || g.isCave(wx, surfaceY, wz) {
+			surfaceY := heightCache[lx][lz]
+			if surfaceY < WaterLevel || surfaceY > 240 || g.isCave(wx, surfaceY, wz) {
+				continue
+			}
+
+			// Overhang check: ensure 3x3 area around trunk is on land
+			overhang := false
+			for dx := -1; dx <= 1; dx++ {
+				for dz := -1; dz <= 1; dz++ {
+					// Check if inside chunk for faster lookup, otherwise SurfaceHeight
+					sx, sz := lx+dx, lz+dz
+					var h int
+					if sx >= 0 && sx < 16 && sz >= 0 && sz < 16 {
+						h = heightCache[sx][sz]
+					} else {
+						h = g.SurfaceHeight(wx+dx, wz+dz)
+					}
+					if h < WaterLevel {
+						overhang = true
+						break
+					}
+				}
+				if overhang {
+					break
+				}
+			}
+			if overhang {
 				continue
 			}
 
@@ -390,7 +434,7 @@ func (g *Generator) buildCactus(lx, y, lz int, sections *[SectionsPerChunk][Chun
 }
 
 // generateBoulders places varied rock clusters.
-func (g *Generator) generateBoulders(chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+func (g *Generator) generateBoulders(chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16, heightCache *[16][16]int) {
 	for lx := 1; lx < 15; lx++ {
 		for lz := 1; lz < 15; lz++ {
 			wx, wz := chunkX*16+lx, chunkZ*16+lz
@@ -422,9 +466,39 @@ func (g *Generator) generateBoulders(chunkX, chunkZ int, sections *[SectionsPerC
 				continue
 			}
 
-			y := g.SurfaceHeight(wx, wz)
+			y := heightCache[lx][lz]
+			if y < WaterLevel {
+				continue
+			}
+
+			// Footprint check for larger boulders
+			overhang := false
+			for dx := -2; dx <= 2; dx++ {
+				for dz := -2; dz <= 2; dz++ {
+					// Check if inside chunk for faster lookup, otherwise SurfaceHeight
+					sx, sz := lx+dx, lz+dz
+					var h int
+					if sx >= 0 && sx < 16 && sz >= 0 && sz < 16 {
+						h = heightCache[sx][sz]
+					} else {
+						h = g.SurfaceHeight(wx+dx, wz+dz)
+					}
+					if h < WaterLevel {
+						overhang = true
+						break
+					}
+				}
+				if overhang {
+					break
+				}
+			}
+			if overhang {
+				continue
+			}
+
 			sec, sy := y/16, y%16
-			if sections[sec][(sy*16+lz)*16+lx]>>4 != 2 && sections[sec][(sy*16+lz)*16+lx]>>4 != 3 {
+			surfID := sections[sec][(sy*16+lz)*16+lx] >> 4
+			if surfID != 2 && surfID != 3 && surfID != 12 && surfID != 80 { // grass, dirt, sand, snow
 				continue
 			}
 
@@ -487,8 +561,10 @@ func (g *Generator) GenerateInternal(chunkX, chunkZ int) ([SectionsPerChunk][Chu
 	var sections [SectionsPerChunk][ChunkSectionSize]uint16
 	var biomes [256]byte
 
-	// 1. Terrain generation
+	// 1. Terrain generation & height caching
 	// ------------------------------------------------------------------
+	var heightCache [16][16]int
+
 	for lx := 0; lx < 16; lx++ {
 		for lz := 0; lz < 16; lz++ {
 			wx, wz := chunkX*16+lx, chunkZ*16+lz
@@ -496,6 +572,7 @@ func (g *Generator) GenerateInternal(chunkX, chunkZ int) ([SectionsPerChunk][Chu
 			biomes[lz*16+lx] = biome.ID
 
 			surfH := g.SurfaceHeight(wx, wz)
+			heightCache[lx][lz] = surfH
 
 			// Fill from bottom up
 			for y := 0; y < 256; y++ {
@@ -533,7 +610,11 @@ func (g *Generator) GenerateInternal(chunkX, chunkZ int) ([SectionsPerChunk][Chu
 					}
 				} else if y <= WaterLevel {
 					// Water filling for lakes/ocean/rivers
-					sections[sec][idx] = 8 << 4
+					if y == WaterLevel && biome.HasSnow {
+						sections[sec][idx] = 79 << 4 // Ice
+					} else {
+						sections[sec][idx] = 8 << 4 // Water
+					}
 				} else {
 					// Air above everything else
 					break
@@ -551,8 +632,8 @@ func (g *Generator) GenerateInternal(chunkX, chunkZ int) ([SectionsPerChunk][Chu
 	g.villageGen.generateVillage(chunkX, chunkZ, villageY, &sections)
 
 	// 3. Decorations
-	g.generateBoulders(chunkX, chunkZ, &sections)
-	g.generateTrees(chunkX, chunkZ, &sections)
+	g.generateBoulders(chunkX, chunkZ, &sections, &heightCache)
+	g.generateTrees(chunkX, chunkZ, &sections, &heightCache)
 
 	return sections, biomes
 }
