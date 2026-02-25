@@ -11,6 +11,15 @@ type Biome struct {
 	TreeDensity     float64 // 0.0 = none, higher = more trees
 	BoulderDensity  float64 // 0.0 = none, chance per column
 	HasSnow         bool
+	// Village styling
+	VillageLog    uint16
+	VillagePlanks uint16
+	VillagePath   uint16
+	VillageSlab   uint16
+	VillageStairs uint16
+	VillageFence  uint16
+	VillageDeco1  uint16
+	VillageDeco2  uint16
 }
 
 // Predefined biomes
@@ -27,32 +36,64 @@ var (
 		SurfaceBlock: 2 << 4, // grass
 		FillerBlock:  3 << 4, // dirt
 		BaseHeight:   66, HeightVariation: 12,
-		TreeDensity:    0.006,
+		TreeDensity:    0.015,
 		BoulderDensity: 0.03,
+		VillageLog:     17 << 4,  // oak log
+		VillagePlanks:  5 << 4,   // oak planks
+		VillagePath:    13 << 4,  // gravel
+		VillageSlab:    126 << 4, // oak slab
+		VillageStairs:  53 << 4,  // oak stairs
+		VillageFence:   85 << 4,  // oak fence
+		VillageDeco1:   37 << 4,  // dandelion
+		VillageDeco2:   38 << 4,  // poppy
 	}
 	BiomeDesert = &Biome{
 		ID: 2, Name: "Desert",
 		SurfaceBlock: 12 << 4, // sand
 		FillerBlock:  24 << 4, // sandstone
 		BaseHeight:   64, HeightVariation: 10,
-		TreeDensity:    0,
-		BoulderDensity: 0.02, // desert rocks
+		TreeDensity:    0.02,
+		BoulderDensity: 0.02,      // desert rocks
+		VillageLog:     24<<4 | 2, // smooth sandstone (farm borders/accents)
+		VillagePlanks:  24 << 4,   // sandstone
+		VillagePath:    24<<4 | 1, // chiseled sandstone
+		VillageSlab:    44<<4 | 1, // sandstone slab
+		VillageStairs:  128 << 4,  // sandstone stairs
+		VillageFence:   139 << 4,  // cobblestone wall
+		VillageDeco1:   31 << 4,   // dead bush
+		VillageDeco2:   31 << 4,   // dead bush
 	}
 	BiomeExtremeHills = &Biome{
 		ID: 3, Name: "Extreme Hills",
 		SurfaceBlock: 2 << 4, // grass
 		FillerBlock:  1 << 4, // stone
 		BaseHeight:   72, HeightVariation: 50,
-		TreeDensity:    0.015,
+		TreeDensity:    0.03,
 		BoulderDensity: 0.08,
+		VillageLog:     17<<4 | 1,  // spruce log
+		VillagePlanks:  5<<4 | 1,   // spruce planks
+		VillagePath:    13 << 4,    // gravel
+		VillageSlab:    126<<4 | 1, // spruce slab
+		VillageStairs:  134 << 4,   // spruce stairs
+		VillageFence:   188 << 4,   // spruce fence
+		VillageDeco1:   37 << 4,    // dandelion
+		VillageDeco2:   38 << 4,    // poppy
 	}
 	BiomeForest = &Biome{
 		ID: 4, Name: "Forest",
 		SurfaceBlock: 2 << 4, // grass
 		FillerBlock:  3 << 4, // dirt
 		BaseHeight:   68, HeightVariation: 14,
-		TreeDensity:    0.05,
+		TreeDensity:    0.065,
 		BoulderDensity: 0.04,
+		VillageLog:     17 << 4,  // oak log
+		VillagePlanks:  5 << 4,   // oak planks
+		VillagePath:    13 << 4,  // gravel
+		VillageSlab:    126 << 4, // oak slab
+		VillageStairs:  53 << 4,  // oak stairs
+		VillageFence:   85 << 4,  // oak fence
+		VillageDeco1:   37 << 4,  // dandelion
+		VillageDeco2:   38 << 4,  // poppy
 	}
 	BiomeJungle = &Biome{
 		ID: 21, Name: "Jungle",
@@ -61,6 +102,14 @@ var (
 		BaseHeight:   70, HeightVariation: 20,
 		TreeDensity:    0.12,
 		BoulderDensity: 0.02,
+		VillageLog:     17<<4 | 3,  // jungle log
+		VillagePlanks:  5<<4 | 3,   // jungle planks
+		VillagePath:    13 << 4,    // gravel
+		VillageSlab:    126<<4 | 3, // jungle slab
+		VillageStairs:  136 << 4,   // jungle stairs
+		VillageFence:   190 << 4,   // jungle fence
+		VillageDeco1:   37 << 4,    // dandelion
+		VillageDeco2:   38 << 4,    // poppy
 	}
 	BiomeDarkForest = &Biome{
 		ID: 29, Name: "Dark Forest",
@@ -69,15 +118,28 @@ var (
 		BaseHeight:   68, HeightVariation: 10,
 		TreeDensity:    0.25,
 		BoulderDensity: 0.02,
+		VillageLog:     162<<4 | 1, // dark oak log
+		VillagePlanks:  5<<4 | 5,   // dark oak planks
+		VillagePath:    13 << 4,    // gravel
+		VillageSlab:    126<<4 | 5, // dark oak slab
+		VillageStairs:  164 << 4,   // dark oak stairs
+		VillageFence:   191 << 4,   // dark oak fence
+		VillageDeco1:   37 << 4,    // dandelion
+		VillageDeco2:   38 << 4,    // poppy
 	}
 	BiomeSnowyTundra = &Biome{
 		ID: 12, Name: "Snowy Tundra",
 		SurfaceBlock: 80 << 4, // snow block
 		FillerBlock:  3 << 4,  // dirt
 		BaseHeight:   66, HeightVariation: 8,
-		TreeDensity:    0.004,
+		TreeDensity:    0.01,
 		BoulderDensity: 0.02,
 		HasSnow:        true,
+		VillageLog:     17<<4 | 1,  // spruce log
+		VillagePlanks:  5<<4 | 1,   // spruce planks
+		VillagePath:    13 << 4,    // gravel
+		VillageSlab:    126<<4 | 1, // spruce slab
+		VillageStairs:  134 << 4,   // spruce stairs
 	}
 )
 

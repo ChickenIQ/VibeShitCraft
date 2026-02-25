@@ -123,7 +123,7 @@ func (s *Server) handlePlay(player *Player) {
 		protocol.WriteByte(w, 0)                         // Dimension: overworld
 		protocol.WriteByte(w, 0)                         // Difficulty: peaceful
 		protocol.WriteByte(w, byte(s.config.MaxPlayers)) // Max players
-		protocol.WriteString(w, "default")               // Level type
+		protocol.WriteString(w, "flat")                  // Level type: flat disables void fog
 		protocol.WriteBool(w, false)                     // Reduced debug info
 	})
 	protocol.WritePacket(conn, joinGame)
