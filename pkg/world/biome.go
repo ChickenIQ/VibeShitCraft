@@ -95,7 +95,8 @@ var allBiomes = []*Biome{
 
 // BiomeAt selects a biome for a world block position using temperature and
 // rainfall noise values. The noise generators should use low-frequency scales
-// so biomes form large regions.
+// so biomes form large regions. It uses a Whittaker-like classification to
+// prevent drastic biome changes (e.g. Desert next to Tundra).
 func BiomeAt(tempNoise, rainNoise *Perlin, worldX, worldZ int) *Biome {
 	// Low-frequency coordinates for large biome regions
 	const scale = 0.003
@@ -105,43 +106,51 @@ func BiomeAt(tempNoise, rainNoise *Perlin, worldX, worldZ int) *Biome {
 	temp := tempNoise.OctaveNoise2D(bx, bz, 2, 2.0, 0.3) // −1..1
 	rain := rainNoise.OctaveNoise2D(bx+500, bz+500, 2, 2.0, 0.3)
 
-	// Map to 0..1
+	// Map to 0..1 and clamp just in case
 	temp = (temp + 1) / 2
-	rain = (rain + 1) / 2
+	if temp < 0 {
+		temp = 0
+	} else if temp > 1.0 {
+		temp = 1.0
+	}
 
-	// Selection based on temperature & rainfall
+	rain = (rain + 1) / 2
+	if rain < 0 {
+		rain = 0
+	} else if rain > 1.0 {
+		rain = 1.0
+	}
+
+	// Whittaker Diagram Classification:
+	// Tundra: Cold, any rain
+	// Taiga/Extreme Hills/Forest: Temperate
+	// Desert/Plains/Jungle: Warm
+
 	switch {
-	case temp < 0.25:
+	case temp < 0.35: // Cold Region
 		return BiomeSnowyTundra
-	case temp < 0.45:
+
+	case temp < 0.65: // Temperate Region
 		if rain > 0.7 {
-			return BiomeDarkForest
+			return BiomeDarkForest // high moisture
 		}
 		if rain > 0.4 {
-			return BiomeForest
+			return BiomeForest // med moisture
 		}
-		return BiomePlains
-	case temp < 0.75:
-		if rain > 0.8 {
-			return BiomeJungle
+		if rain > 0.25 {
+			return BiomePlains // low moisture
 		}
-		if rain > 0.5 {
-			return BiomeDarkForest
+		return BiomeExtremeHills // very low moisture
+
+	default: // Warm/Hot Region (temp >= 0.65)
+		if rain > 0.75 {
+			return BiomeJungle // high moisture, hot
 		}
-		if rain > 0.3 {
-			return BiomeForest
+		// Transition between Jungle and Desert
+		if rain > 0.4 {
+			return BiomePlains // somewhat dry, hot
 		}
-		if rain < 0.2 {
-			return BiomeExtremeHills
-		}
-		return BiomePlains
-	default:
-		if rain > 0.7 {
-			return BiomeJungle
-		}
-		if rain < 0.3 {
-			return BiomeDesert
-		}
-		return BiomePlains
+		// Dry, hot
+		return BiomeDesert
 	}
 }

@@ -53,10 +53,27 @@ func (g *Generator) shouldPlaceTree(x, z int, biome *Biome) bool {
 	if biome.TreeDensity <= 0 || g.villageGen.IsInVillage(x, z) {
 		return false
 	}
-	const scale = 0.7
-	v := g.treeNoise.Noise2D(float64(x)*scale, float64(z)*scale)
-	v = (v + 1) / 2 // [0,1]
-	return v < biome.TreeDensity
+
+	// Low frequency noise to create macro "forest clusters" and "clearings"
+	const clusterScale = 0.02
+	clusterVal := g.treeNoise.Noise2D(float64(x)*clusterScale, float64(z)*clusterScale)
+	clusterVal = (clusterVal + 1) / 2 // [0,1]
+
+	// If we are in a dense cluster region, increase density. If in a clearing, reduce it.
+	// Multiply base density by a cluster factor (e.g. 0.0 to 1.5)
+	effectiveDensity := biome.TreeDensity * (clusterVal * 1.5)
+
+	// Pseudo-random value for this specific (x,z) coordinate
+	hash := uint32(x*73856093 ^ z*191152071 ^ int(g.Seed))
+	hash ^= hash >> 16
+	hash *= 0x85ebca6b
+	hash ^= hash >> 13
+	hash *= 0xc2b2ae35
+	hash ^= hash >> 16
+
+	randVal := float64(hash) / float64(0xFFFFFFFF)
+
+	return randVal < effectiveDensity
 }
 
 // WaterLevel is the sea level.
@@ -309,11 +326,30 @@ func (g *Generator) generateBoulders(chunkX, chunkZ int, sections *[SectionsPerC
 		for lz := 1; lz < 15; lz++ {
 			wx, wz := chunkX*16+lx, chunkZ*16+lz
 			biome := BiomeAt(g.tempNoise, g.rainNoise, wx, wz)
-			if biome.BoulderDensity <= 0 {
+			if biome.BoulderDensity <= 0 || g.villageGen.IsInVillage(wx, wz) {
 				continue
 			}
-			v := g.boulderNoise.Noise2D(float64(wx)*0.1, float64(wz)*0.1)
-			if v < 1.0-biome.BoulderDensity*5 || g.villageGen.IsInVillage(wx, wz) {
+
+			// Low frequency noise for "boulder fields"
+			const clusterScale = 0.01
+			clusterVal := g.boulderNoise.Noise2D(float64(wx)*clusterScale, float64(wz)*clusterScale)
+			clusterVal = (clusterVal + 1) / 2 // [0, 1]
+
+			// Increase/decrease density based on the macro cluster value
+			// We divide by 40 because each boulder has a large radius (~4), covering a lot of area.
+			effectiveDensity := (biome.BoulderDensity / 40.0) * (clusterVal * 2.0)
+
+			// Fast pseudo-random hash for this coordinate
+			hash := uint32(wx*142071 ^ wz*650021 ^ int(g.Seed+42))
+			hash ^= hash >> 16
+			hash *= 0x85ebca6b
+			hash ^= hash >> 13
+			hash *= 0xc2b2ae35
+			hash ^= hash >> 16
+
+			randVal := float64(hash) / float64(0xFFFFFFFF)
+
+			if randVal > effectiveDensity {
 				continue
 			}
 
