@@ -94,6 +94,16 @@ func (s *Server) handleBlockBreak(player *Player, x, y, z int32) {
 	vz := (rand.Float64()*0.2 - 0.1)
 	s.SpawnItem(float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, vx, vy, vz, itemID, damage, count)
 
+	// Fully grown wheat (block 59, metadata 7) also drops 0-3 wheat seeds
+	if blockID == 59 && blockState&0x0F == 7 {
+		seedCount := byte(rand.Intn(4)) // 0-3 seeds
+		if seedCount > 0 {
+			svx := (rand.Float64()*0.2 - 0.1)
+			svz := (rand.Float64()*0.2 - 0.1)
+			s.SpawnItem(float64(x)+0.5, float64(y)+0.5, float64(z)+0.5, svx, 0.2, svz, 295, 0, seedCount)
+		}
+	}
+
 	log.Printf("Player %s broke block %d at (%d, %d, %d), spawned item %d:%d (count: %d)", player.Username, blockID, x, y, z, itemID, damage, count)
 }
 
@@ -260,6 +270,52 @@ func (s *Server) handleBlockPlacement(player *Player, r *bytes.Reader) {
 		s.mu.RUnlock()
 
 		return // Don't place a block!
+	}
+
+	// Handle hoe tilling: right-clicking grass (2) or dirt (3) with a hoe creates farmland (60)
+	isHoe := itemID == 290 || itemID == 291 || itemID == 292 || itemID == 293 || itemID == 294
+	if isHoe && (clickedBlockID == 2 || clickedBlockID == 3) {
+		farmlandState := uint16(60) << 4
+		s.world.SetBlock(x, y, z, farmlandState)
+		s.broadcastBlockChange(x, y, z, farmlandState)
+
+		// Damage the hoe in survival mode
+		if player.GameMode == GameModeSurvival {
+			player.mu.Lock()
+			slotIndex := 36 + player.ActiveSlot
+			if player.Inventory[slotIndex].ItemID == itemID {
+				player.Inventory[slotIndex].Damage++
+				// Check if hoe is broken (max durability depends on material)
+				maxDurability := int16(0)
+				switch itemID {
+				case 290: // Wooden hoe
+					maxDurability = 59
+				case 291: // Stone hoe
+					maxDurability = 131
+				case 292: // Iron hoe
+					maxDurability = 250
+				case 293: // Diamond hoe
+					maxDurability = 1561
+				case 294: // Gold hoe
+					maxDurability = 32
+				}
+				if player.Inventory[slotIndex].Damage >= maxDurability {
+					player.Inventory[slotIndex] = Slot{ItemID: -1}
+				}
+				slot := player.Inventory[slotIndex]
+				pkt := protocol.MarshalPacket(0x2F, func(w *bytes.Buffer) {
+					protocol.WriteByte(w, 0)
+					protocol.WriteInt16(w, int16(slotIndex))
+					protocol.WriteSlotData(w, slot.ItemID, slot.Count, slot.Damage)
+				})
+				if player.Conn != nil {
+					protocol.WritePacket(player.Conn, pkt)
+				}
+			}
+			player.mu.Unlock()
+		}
+		log.Printf("Player %s tilled block at (%d, %d, %d)", player.Username, x, y, z)
+		return
 	}
 
 	// Handle bonemeal on crops and saplings

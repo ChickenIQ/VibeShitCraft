@@ -211,6 +211,22 @@ func (s *Server) tickEntityPhysics() {
 		movedItems = append(movedItems, movedItem{item.EntityID, item.X, item.Y, item.Z, item.VX, item.VY, item.VZ})
 	}
 
+	// Check for items touching cactus blocks and mark them for destruction
+	var cactusDestroyed []int32
+	for _, item := range s.entities {
+		bx := int32(math.Floor(item.X))
+		by := int32(math.Floor(item.Y))
+		bz := int32(math.Floor(item.Z))
+		// Check the block at the item's position and adjacent blocks
+		for _, off := range [][3]int32{{0, 0, 0}, {0, 1, 0}} {
+			block := s.world.GetBlock(bx+off[0], by+off[1], bz+off[2])
+			if block>>4 == 81 { // Cactus
+				cactusDestroyed = append(cactusDestroyed, item.EntityID)
+				break
+			}
+		}
+	}
+
 	type movedMob struct {
 		entityID   int32
 		x, y, z    float64
@@ -297,6 +313,18 @@ func (s *Server) tickEntityPhysics() {
 
 	s.mu.Unlock()
 
+	// Destroy items that touched cactus
+	for _, eid := range cactusDestroyed {
+		s.mu.Lock()
+		if _, exists := s.entities[eid]; exists {
+			delete(s.entities, eid)
+			s.mu.Unlock()
+			s.broadcastDestroyEntity(eid)
+		} else {
+			s.mu.Unlock()
+		}
+	}
+
 	for _, m := range movedItems {
 		s.broadcastEntityTeleportByID(m.entityID, m.x, m.y, m.z, 0, 0, true)
 		s.broadcastEntityVelocity(m.entityID, m.vx, m.vy, m.vz)
@@ -340,9 +368,13 @@ func (s *Server) broadcastSpawnItem(item *ItemEntity) {
 		protocol.WriteInt32(w, int32(item.X*32))
 		protocol.WriteInt32(w, int32(item.Y*32))
 		protocol.WriteInt32(w, int32(item.Z*32))
-		protocol.WriteByte(w, 0)  // Pitch
-		protocol.WriteByte(w, 0)  // Yaw
-		protocol.WriteInt32(w, 0) // Data for thrower (0 usually)
+		protocol.WriteByte(w, 0) // Pitch
+		protocol.WriteByte(w, 0) // Yaw
+		// Data must be non-zero for velocity fields to be included
+		protocol.WriteInt32(w, 1)
+		protocol.WriteInt16(w, int16(item.VX*8000))
+		protocol.WriteInt16(w, int16(item.VY*8000))
+		protocol.WriteInt16(w, int16(item.VZ*8000))
 	})
 
 	// Entity Velocity - 0x12
@@ -446,9 +478,13 @@ func (s *Server) sendItemToPlayer(player *Player, item *ItemEntity) {
 		protocol.WriteInt32(w, int32(item.X*32))
 		protocol.WriteInt32(w, int32(item.Y*32))
 		protocol.WriteInt32(w, int32(item.Z*32))
-		protocol.WriteByte(w, 0)  // Pitch
-		protocol.WriteByte(w, 0)  // Yaw
-		protocol.WriteInt32(w, 0) // Data (needs to be non-zero for some objects, but 0 often means no velocity)
+		protocol.WriteByte(w, 0) // Pitch
+		protocol.WriteByte(w, 0) // Yaw
+		// Data must be non-zero for velocity fields to be included
+		protocol.WriteInt32(w, 1)
+		protocol.WriteInt16(w, int16(item.VX*8000))
+		protocol.WriteInt16(w, int16(item.VY*8000))
+		protocol.WriteInt16(w, int16(item.VZ*8000))
 	})
 
 	// Entity Metadata - 0x1C
