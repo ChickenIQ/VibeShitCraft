@@ -2,7 +2,7 @@ package world
 
 import (
 	"bytes"
-	"encoding/binary"
+	"math"
 )
 
 // Generator produces terrain data from a seed using Perlin noise.
@@ -17,11 +17,13 @@ type Generator struct {
 	treeNoise    *Perlin      // tree placement
 	boulderNoise *Perlin      // boulder placement
 	villageGen   *VillageGrid // village placement grid
+	lakeNoise    *Perlin      // lake carving noise
+	riverNoise   *Perlin      // river carving noise
 }
 
 // NewGenerator creates a terrain generator from a seed.
 func NewGenerator(seed int64) *Generator {
-	return &Generator{
+	g := &Generator{
 		Seed:         seed,
 		terrain:      NewPerlin(seed),
 		roughness:    NewPerlin(seed + 100),
@@ -31,81 +33,191 @@ func NewGenerator(seed int64) *Generator {
 		cave2:        NewPerlin(seed + 5),
 		treeNoise:    NewPerlin(seed + 4),
 		boulderNoise: NewPerlin(seed + 200),
-		villageGen:   NewVillageGrid(seed),
 	}
+	g.villageGen = NewVillageGrid(seed, g.tempNoise, g.rainNoise, g.SurfaceHeight)
+	g.lakeNoise = NewPerlin(seed + 300)
+	g.riverNoise = NewPerlin(seed + 400)
+	return g
 }
-
-// FlatSurfaceY is the surface level for the flat world.
-const FlatSurfaceY = 3
 
 // SurfaceHeight returns the solid surface Y for the given world-space x, z.
 func (g *Generator) SurfaceHeight(x, z int) int {
-	return FlatSurfaceY
+	// Biome Blending: sample biomes in a neighborhood to smooth transitions
+	// ------------------------------------------------------------------
+	var totalBase float64
+	var totalVar float64
+	var totalWeight float64
+
+	const radius = 4
+	const stride = 4 // Increased from 2 to 4 for 3x3 sampling
+
+	for dx := -radius; dx <= radius; dx += stride {
+		for dz := -radius; dz <= radius; dz += stride {
+			// Get biome at sample point
+			b := BiomeAt(g.tempNoise, g.rainNoise, x+dx, z+dz)
+
+			// Simple distance-based weight (closer points matter more)
+			// Using 1.0 for now for simple linear blending, but could be Gaussian
+			weight := 1.0
+			totalBase += float64(b.BaseHeight) * weight
+			totalVar += b.HeightVariation * weight
+			totalWeight += weight
+		}
+	}
+
+	blendedBase := totalBase / totalWeight
+	blendedVar := totalVar / totalWeight
+
+	// Base height noise
+	const noiseScale = 0.015
+	h := g.terrain.OctaveNoise2D(float64(x)*noiseScale, float64(z)*noiseScale, 3, 2.0, 0.5)
+
+	// Combine blended base height and variation
+	height := blendedBase + h*blendedVar
+
+	// 1. Rare Rivers (Ridged Noise)
+	// ------------------------------------------------------------------
+	const riverScale = 0.003
+	rv := g.riverNoise.Noise2D(float64(x)*riverScale, float64(z)*riverScale)
+	rv = math.Abs(rv)
+
+	if rv < 0.04 {
+		factor := (0.04 - rv) / 0.04
+		depth := factor * 15.0
+		height -= depth
+	}
+
+	// 2. Rare Lakes (Threshold Noise)
+	// ------------------------------------------------------------------
+	const lakeScale = 0.01
+	lv := g.lakeNoise.Noise2D(float64(x)*lakeScale, float64(z)*lakeScale)
+	if lv > 0.82 {
+		factor := (lv - 0.82) / (1.0 - 0.82)
+		depth := factor * 12.0
+		height -= depth
+	}
+
+	return int(height)
 }
 
 // isCave returns true if the block at (x,y,z) should be carved into a cave.
 func (g *Generator) isCave(x, y, z int) bool {
-	return false // flat world: no caves
+	// Simple 3D Perlin for caves, starting below surface
+	lowRes := g.caveNoise.Noise3D(float64(x)*0.03, float64(y)*0.03, float64(z)*0.03)
+	if lowRes > 0.5 {
+		spaghetti := g.cave2.Noise3D(float64(x)*0.08, float64(y)*0.08, float64(z)*0.08)
+		return spaghetti > 0.3
+	}
+	return false
 }
 
 // shouldPlaceTree returns true if a tree should be placed at (x, z) given the biome's density.
 func (g *Generator) shouldPlaceTree(x, z int, biome *Biome) bool {
-	if biome.TreeDensity <= 0 || g.villageGen.IsInVillage(x, z) {
+	// Density already checked by caller, but just in case
+	if biome.TreeDensity <= 0 {
 		return false
 	}
-	const scale = 0.7
-	v := g.treeNoise.Noise2D(float64(x)*scale, float64(z)*scale)
-	v = (v + 1) / 2 // [0,1]
-	return v < biome.TreeDensity
+
+	// Low frequency noise to create macro "forest clusters" and "clearings"
+	const clusterScale = 0.02
+	clusterVal := g.treeNoise.Noise2D(float64(x)*clusterScale, float64(z)*clusterScale)
+	clusterVal = (clusterVal + 1) / 2 // [0,1]
+
+	// If we are in a dense cluster region, increase density. If in a clearing, reduce it.
+	// Multiply base density by a cluster factor (e.g. 0.0 to 1.5)
+	effectiveDensity := biome.TreeDensity * (clusterVal * 1.5)
+
+	// Pseudo-random value for this specific (x,z) coordinate
+	hash := uint32(x*73856093 ^ z*191152071 ^ int(g.Seed))
+	hash ^= hash >> 16
+	hash *= 0x85ebca6b
+	hash ^= hash >> 13
+	hash *= 0xc2b2ae35
+	hash ^= hash >> 16
+
+	randVal := float64(hash) / float64(0xFFFFFFFF)
+
+	return randVal < effectiveDensity
 }
 
 // WaterLevel is the sea level.
 const WaterLevel = 62
 
-// BlockAt returns the block state at a world-space (x, y, z).
-// Flat world: bedrock(0), dirt(1-2), grass(3), air above.
 func (g *Generator) BlockAt(x, y, z int) uint16 {
 	if y < 0 || y > 255 {
 		return 0
 	}
-	switch {
-	case y == 0:
+	if y == 0 {
 		return 7 << 4 // bedrock
-	case y < FlatSurfaceY:
-		return 3 << 4 // dirt
-	case y == FlatSurfaceY:
-		return 2 << 4 // grass
-	default:
+	}
+
+	surfH := g.SurfaceHeight(x, z)
+	if y > surfH {
+		if y <= WaterLevel {
+			return 8 << 4 // water
+		}
 		return 0 // air
 	}
+
+	biome := BiomeAt(g.tempNoise, g.rainNoise, x, z)
+	if y < surfH {
+		return biome.FillerBlock
+	}
+	return biome.SurfaceBlock
 }
 
 // generateTrees places various tree types based on biome.
-func (g *Generator) generateTrees(chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+func (g *Generator) generateTrees(chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16, heightCache *[24][24]int, chunkInVill bool) {
 	for lx := 2; lx < 14; lx++ {
 		for lz := 2; lz < 14; lz++ {
 			wx := chunkX*16 + lx
 			wz := chunkZ*16 + lz
 
 			biome := BiomeAt(g.tempNoise, g.rainNoise, wx, wz)
+
+			if biome.TreeDensity <= 0 || (chunkInVill && g.villageGen.IsInVillage(wx, wz)) {
+				continue
+			}
+
 			if !g.shouldPlaceTree(wx, wz, biome) {
 				continue
 			}
 
-			surfaceY := g.SurfaceHeight(wx, wz)
-			if surfaceY > 240 || g.isCave(wx, surfaceY, wz) {
+			surfaceY := heightCache[lx+4][lz+4]
+			if surfaceY < WaterLevel || surfaceY > 240 || g.isCave(wx, surfaceY, wz) {
 				continue
 			}
 
-			// Surface must be grass or snow
+			// Overhang check: ensure 3x3 area around trunk is on land
+			overhang := false
+			for dx := -1; dx <= 1; dx++ {
+				for dz := -1; dz <= 1; dz++ {
+					// Read natively from the expanded 24x24 [-4, 19] height cache
+					h := heightCache[lx+dx+4][lz+dz+4]
+					if h < WaterLevel {
+						overhang = true
+						break
+					}
+				}
+				if overhang {
+					break
+				}
+			}
+			if overhang {
+				continue
+			}
+
+			// Surface must be grass, snowy dirt, or sand
 			surfBlock := sections[surfaceY/16][(surfaceY%16*16+lz)*16+lx] >> 4
-			if surfBlock != 2 && surfBlock != 80 && surfBlock != 3 { // grass, snow, or dirt
+			if surfBlock != 2 && surfBlock != 80 && surfBlock != 3 && surfBlock != 12 { // grass, snow, dirt, or sand
 				continue
 			}
 
 			// Determine tree type
-			treeType := 0 // 0: Oak, 1: Spruce, 2: Birch, 3: Jungle, 4: Dark Oak
-			if biome == BiomeJungle {
+			treeType := 0 // 0: Oak, 1: Spruce, 2: Birch, 3: Jungle, 4: Dark Oak, 5: Cactus
+			if biome == BiomeDesert {
+				treeType = 5
+			} else if biome == BiomeJungle {
 				treeType = 3
 			} else if biome == BiomeDarkForest {
 				treeType = 4
@@ -127,6 +239,14 @@ func (g *Generator) generateTrees(chunkX, chunkZ int, sections *[SectionsPerChun
 				g.buildJungleTree(lx, surfaceY+1, lz, sections)
 			case 4: // Dark Oak
 				g.buildDarkOakTree(lx, surfaceY+1, lz, sections)
+			case 5: // Desert (Cactus or Dead Bush)
+				// 40% chance of Cactus, 60% of Dead Bush
+				if (wx*13+wz*7)%10 < 4 {
+					g.buildCactus(lx, surfaceY+1, lz, sections)
+				} else {
+					sec, sy := (surfaceY+1)/16, (surfaceY+1)%16
+					sections[sec][(sy*16+lz)*16+lx] = 31 << 4 // Dead Bush
+				}
 			default: // Oak
 				g.buildGenericTree(lx, surfaceY+1, lz, 0, sections)
 			}
@@ -303,23 +423,75 @@ func (g *Generator) buildDarkOakTree(lx, y, lz int, sections *[SectionsPerChunk]
 	}
 }
 
+// buildCactus builds a 2-3 block high cactus.
+func (g *Generator) buildCactus(lx, y, lz int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+	height := 2 + (lx*7+lz*13)%2
+	for ty := y; ty < y+height; ty++ {
+		sec, sy := ty/16, ty%16
+		sections[sec][(sy*16+lz)*16+lx] = 81 << 4 // Cactus block
+	}
+}
+
 // generateBoulders places varied rock clusters.
-func (g *Generator) generateBoulders(chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
+func (g *Generator) generateBoulders(chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16, heightCache *[24][24]int, chunkInVill bool) {
 	for lx := 1; lx < 15; lx++ {
 		for lz := 1; lz < 15; lz++ {
 			wx, wz := chunkX*16+lx, chunkZ*16+lz
 			biome := BiomeAt(g.tempNoise, g.rainNoise, wx, wz)
-			if biome.BoulderDensity <= 0 {
-				continue
-			}
-			v := g.boulderNoise.Noise2D(float64(wx)*0.1, float64(wz)*0.1)
-			if v < 1.0-biome.BoulderDensity*5 || g.villageGen.IsInVillage(wx, wz) {
+			if biome.BoulderDensity <= 0 || (chunkInVill && g.villageGen.IsInVillage(wx, wz)) {
 				continue
 			}
 
-			y := g.SurfaceHeight(wx, wz)
+			// Low frequency noise for "boulder fields"
+			const clusterScale = 0.01
+			clusterVal := g.boulderNoise.Noise2D(float64(wx)*clusterScale, float64(wz)*clusterScale)
+			clusterVal = (clusterVal + 1) / 2 // [0, 1]
+
+			// Increase/decrease density based on the macro cluster value
+			// We divide by 40 because each boulder has a large radius (~4), covering a lot of area.
+			effectiveDensity := (biome.BoulderDensity / 40.0) * (clusterVal * 2.0)
+
+			// Fast pseudo-random hash for this coordinate
+			hash := uint32(wx*142071 ^ wz*650021 ^ int(g.Seed+42))
+			hash ^= hash >> 16
+			hash *= 0x85ebca6b
+			hash ^= hash >> 13
+			hash *= 0xc2b2ae35
+			hash ^= hash >> 16
+
+			randVal := float64(hash) / float64(0xFFFFFFFF)
+
+			if randVal > effectiveDensity {
+				continue
+			}
+
+			y := heightCache[lx+4][lz+4]
+			if y < WaterLevel {
+				continue
+			}
+
+			// Footprint check for larger boulders
+			overhang := false
+			for dx := -2; dx <= 2; dx++ {
+				for dz := -2; dz <= 2; dz++ {
+					// Read natively from the expanded 24x24 [-4, 19] height cache
+					h := heightCache[lx+dx+4][lz+dz+4]
+					if h < WaterLevel {
+						overhang = true
+						break
+					}
+				}
+				if overhang {
+					break
+				}
+			}
+			if overhang {
+				continue
+			}
+
 			sec, sy := y/16, y%16
-			if sections[sec][(sy*16+lz)*16+lx]>>4 != 2 && sections[sec][(sy*16+lz)*16+lx]>>4 != 3 {
+			surfID := sections[sec][(sy*16+lz)*16+lx] >> 4
+			if surfID != 2 && surfID != 3 && surfID != 12 && surfID != 80 { // grass, dirt, sand, snow
 				continue
 			}
 
@@ -378,41 +550,123 @@ func (g *Generator) generateBoulders(chunkX, chunkZ int, sections *[SectionsPerC
 	}
 }
 
-// GenerateInternal produces the raw chunk data (sections and biomes).
 func (g *Generator) GenerateInternal(chunkX, chunkZ int) ([SectionsPerChunk][ChunkSectionSize]uint16, [256]byte) {
 	var sections [SectionsPerChunk][ChunkSectionSize]uint16
 	var biomes [256]byte
 
-	// Fill block data per section — flat world
+	// 1. Terrain generation & height caching
+	// ------------------------------------------------------------------
+	// Oversized 24x24 height cache mapping local coords [-4, 19]
+	// This ensures structures checking overhangs up to +/- 4 blocks
+	// don't trigger slow-path noise evaluation.
+	var heightCache [24][24]int
+
+	// Subsampled height map: 6x6 grid mapping [-4, 20] (indices 0 to 5)
+	var heightMap [6][6]float64
+	for x := 0; x <= 5; x++ {
+		for z := 0; z <= 5; z++ {
+			wx := chunkX*16 + (x * 4) - 4
+			wz := chunkZ*16 + (z * 4) - 4
+			heightMap[x][z] = float64(g.SurfaceHeight(wx, wz))
+		}
+	}
+
+	for lx := 0; lx < 24; lx++ {
+		for lz := 0; lz < 24; lz++ {
+			gridX := lx / 4
+			gridZ := lz / 4
+			if gridX > 4 {
+				gridX = 4
+			}
+			if gridZ > 4 {
+				gridZ = 4
+			}
+
+			u := float64(lx%4) / 4.0
+			v := float64(lz%4) / 4.0
+
+			h00 := heightMap[gridX][gridZ]
+			h10 := heightMap[gridX+1][gridZ]
+			h01 := heightMap[gridX][gridZ+1]
+			h11 := heightMap[gridX+1][gridZ+1]
+
+			h0 := h00 + (h10-h00)*u
+			h1 := h01 + (h11-h01)*u
+			surfH := int(h0 + (h1-h0)*v)
+
+			heightCache[lx][lz] = surfH
+		}
+	}
+
 	for lx := 0; lx < 16; lx++ {
 		for lz := 0; lz < 16; lz++ {
-			biomes[lz*16+lx] = BiomeAt(g.tempNoise, g.rainNoise, chunkX*16+lx, chunkZ*16+lz).ID
+			wx, wz := chunkX*16+lx, chunkZ*16+lz
+			biome := BiomeAt(g.tempNoise, g.rainNoise, wx, wz)
+			biomes[lz*16+lx] = biome.ID
 
-			for y := 0; y <= FlatSurfaceY; y++ {
+			surfH := heightCache[lx+4][lz+4]
+
+			// Fill from bottom up
+			for y := 0; y < 256; y++ {
 				sec := y / 16
 				sy := y % 16
 				idx := (sy*16+lz)*16 + lx
 
-				switch {
-				case y == 0:
-					sections[sec][idx] = 7 << 4 // bedrock
-				case y < FlatSurfaceY:
-					sections[sec][idx] = 3 << 4 // dirt
-				case y == FlatSurfaceY:
-					sections[sec][idx] = 2 << 4 // grass
+				if y == 0 {
+					sections[sec][idx] = 7 << 4 // Bedrock
+					continue
+				}
+
+				if y <= surfH {
+					// Check for caves (if active)
+					if y < surfH-2 && g.isCave(wx, y, wz) {
+						// Fill water if below sea level
+						if y <= WaterLevel {
+							sections[sec][idx] = 8 << 4
+						} else {
+							sections[sec][idx] = 0 // Air
+						}
+						continue
+					}
+
+					if y < surfH {
+						sections[sec][idx] = biome.FillerBlock
+					} else {
+						// Surface block logic
+						// If under water, use sand/gravel instead of grass
+						if y < WaterLevel {
+							sections[sec][idx] = 12 << 4 // Sand underwater
+						} else {
+							sections[sec][idx] = biome.SurfaceBlock
+						}
+					}
+				} else if y <= WaterLevel {
+					// Water filling for lakes/ocean/rivers
+					if y == WaterLevel && biome.HasSnow {
+						sections[sec][idx] = 79 << 4 // Ice
+					} else {
+						sections[sec][idx] = 8 << 4 // Water
+					}
+				} else {
+					// Air above everything else
+					break
 				}
 			}
 		}
 	}
 
-	// Place village structures
-	g.villageGen.generateVillage(chunkX, chunkZ, FlatSurfaceY, &sections)
+	// 2. Village placement
+	// Determine surface height at village center to avoid floating/buried towns
+	villageY := g.SurfaceHeight(chunkX*16+8, chunkZ*16+8)
+	if villageY < WaterLevel {
+		villageY = WaterLevel // Don't build villages underwater
+	}
+	g.villageGen.generateVillage(chunkX, chunkZ, villageY, &sections)
 
-	// Place boulders
-	g.generateBoulders(chunkX, chunkZ, &sections)
-
-	// Place trees
-	g.generateTrees(chunkX, chunkZ, &sections)
+	// 3. Decorations
+	chunkInVill := g.villageGen.ChunkInVillage(chunkX, chunkZ)
+	g.generateBoulders(chunkX, chunkZ, &sections, &heightCache, chunkInVill)
+	g.generateTrees(chunkX, chunkZ, &sections, &heightCache, chunkInVill)
 
 	return sections, biomes
 }
@@ -442,14 +696,22 @@ func SerializeSections(sections *[SectionsPerChunk][ChunkSectionSize]uint16, bio
 		}
 	}
 
+	// Pre-create light buffers filled with 0xFF
+	lightBuf := bytes.Repeat([]byte{0xFF}, 2048)
+
 	// Write all block data for each active section first
 	for s := 0; s < SectionsPerChunk; s++ {
 		if primaryBitMask&(1<<uint(s)) == 0 {
 			continue
 		}
-		for _, b := range sections[s] {
-			binary.Write(&buf, binary.LittleEndian, b)
+		// Manually encode uint16 array to little endian bytes
+		// Avoids binary.Write reflection and allocations
+		bData := make([]byte, ChunkSectionSize*2)
+		for i, b := range sections[s] {
+			bData[i*2] = byte(b)
+			bData[i*2+1] = byte(b >> 8)
 		}
+		buf.Write(bData)
 	}
 
 	// Then write block light for each active section
@@ -457,11 +719,7 @@ func SerializeSections(sections *[SectionsPerChunk][ChunkSectionSize]uint16, bio
 		if primaryBitMask&(1<<uint(s)) == 0 {
 			continue
 		}
-		light := make([]byte, 2048)
-		for i := range light {
-			light[i] = 0xFF
-		}
-		buf.Write(light)
+		buf.Write(lightBuf)
 	}
 
 	// Then write sky light for each active section
@@ -469,11 +727,7 @@ func SerializeSections(sections *[SectionsPerChunk][ChunkSectionSize]uint16, bio
 		if primaryBitMask&(1<<uint(s)) == 0 {
 			continue
 		}
-		sky := make([]byte, 2048)
-		for i := range sky {
-			sky[i] = 0xFF
-		}
-		buf.Write(sky)
+		buf.Write(lightBuf)
 	}
 
 	// Biome data (256 bytes)

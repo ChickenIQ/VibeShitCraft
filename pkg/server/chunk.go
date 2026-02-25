@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"sort"
 
 	"github.com/VibeShit/VibeShitCraft/pkg/protocol"
 )
@@ -14,28 +15,47 @@ func (s *Server) sendSpawnChunks(player *Player) {
 	player.loadedChunks = make(map[ChunkPos]bool)
 	player.lastChunkX = playerChunkX
 	player.lastChunkZ = playerChunkZ
-	player.mu.Unlock()
 
-	// Send chunks in a square around the player's chunk
+	var toQueue []ChunkPos
 	for cx := playerChunkX - ViewDistance; cx <= playerChunkX+ViewDistance; cx++ {
 		for cz := playerChunkZ - ViewDistance; cz <= playerChunkZ+ViewDistance; cz++ {
-			s.sendChunkColumn(player, cx, cz)
+			pos := ChunkPos{cx, cz}
+			player.loadedChunks[pos] = true
+			toQueue = append(toQueue, pos)
+		}
+	}
+	player.mu.Unlock()
+
+	// Sort chunks by distance to player so nearest chunks arrive first
+	sort.Slice(toQueue, func(i, j int) bool {
+		dx1 := toQueue[i].X - playerChunkX
+		dz1 := toQueue[i].Z - playerChunkZ
+		dx2 := toQueue[j].X - playerChunkX
+		dz2 := toQueue[j].Z - playerChunkZ
+		return (dx1*dx1 + dz1*dz1) < (dx2*dx2 + dz2*dz2)
+	})
+
+	for _, pos := range toQueue {
+		select {
+		case player.ChunkQueue <- pos:
+		default:
 		}
 	}
 }
 
 // sendChunkColumn generates and sends a single chunk column to a player.
-func (s *Server) sendChunkColumn(player *Player, cx, cz int32) {
+// Returns true if the chunk was actually generated/sent.
+func (s *Server) sendChunkColumn(player *Player, cx, cz int32) bool {
 	pos := ChunkPos{cx, cz}
 	player.mu.Lock()
-	if player.loadedChunks[pos] {
+	if !player.loadedChunks[pos] {
+		// Player moved away before we could process the queued chunk
 		player.mu.Unlock()
-		return
+		return false
 	}
-	player.loadedChunks[pos] = true
 	player.mu.Unlock()
 
-	chunkData, primaryBitMask := s.world.GetChunkData(int32(cx), int32(cz))
+	chunkData, primaryBitMask := s.world.GetChunkData(cx, cz)
 	pkt := protocol.MarshalPacket(0x21, func(w *bytes.Buffer) {
 		protocol.WriteInt32(w, cx)                     // Chunk X
 		protocol.WriteInt32(w, cz)                     // Chunk Z
@@ -44,11 +64,16 @@ func (s *Server) sendChunkColumn(player *Player, cx, cz int32) {
 		protocol.WriteVarInt(w, int32(len(chunkData))) // Size
 		w.Write(chunkData)                             // Data
 	})
+
 	player.mu.Lock()
-	if player.Conn != nil {
-		protocol.WritePacket(player.Conn, pkt)
-	}
+	conn := player.Conn
+	stillLoaded := player.loadedChunks[pos]
 	player.mu.Unlock()
+
+	if conn != nil && stillLoaded {
+		protocol.WritePacket(conn, pkt)
+	}
+	return true
 }
 
 // sendChunkUpdates streams new chunks to the player when they cross chunk boundaries
@@ -65,17 +90,18 @@ func (s *Server) sendChunkUpdates(player *Player) {
 
 	player.lastChunkX = currentChunkX
 	player.lastChunkZ = currentChunkZ
-	player.mu.Unlock()
 
-	// Send new chunks that are now in range
+	var toQueue []ChunkPos
 	for cx := currentChunkX - ViewDistance; cx <= currentChunkX+ViewDistance; cx++ {
 		for cz := currentChunkZ - ViewDistance; cz <= currentChunkZ+ViewDistance; cz++ {
-			s.sendChunkColumn(player, cx, cz)
+			pos := ChunkPos{cx, cz}
+			if !player.loadedChunks[pos] {
+				player.loadedChunks[pos] = true
+				toQueue = append(toQueue, pos)
+			}
 		}
 	}
 
-	// Unload chunks that are now out of range
-	player.mu.Lock()
 	var toUnload []ChunkPos
 	for pos := range player.loadedChunks {
 		dx := pos.X - currentChunkX
@@ -89,20 +115,38 @@ func (s *Server) sendChunkUpdates(player *Player) {
 	}
 	player.mu.Unlock()
 
-	// Send unload packets (empty chunk with primary bit mask 0)
-	for _, pos := range toUnload {
-		pkt := protocol.MarshalPacket(0x21, func(w *bytes.Buffer) {
-			protocol.WriteInt32(w, pos.X)
-			protocol.WriteInt32(w, pos.Z)
-			protocol.WriteBool(w, true) // Ground-up continuous
-			protocol.WriteUint16(w, 0)  // Primary bit mask: 0 = unload
-			protocol.WriteVarInt(w, 0)  // Size: 0
-		})
-		player.mu.Lock()
-		if player.Conn != nil {
-			protocol.WritePacket(player.Conn, pkt)
+	// Sort new chunks by distance to player
+	sort.Slice(toQueue, func(i, j int) bool {
+		dx1 := toQueue[i].X - currentChunkX
+		dz1 := toQueue[i].Z - currentChunkZ
+		dx2 := toQueue[j].X - currentChunkX
+		dz2 := toQueue[j].Z - currentChunkZ
+		return (dx1*dx1 + dz1*dz1) < (dx2*dx2 + dz2*dz2)
+	})
+
+	for _, pos := range toQueue {
+		select {
+		case player.ChunkQueue <- pos:
+		default:
 		}
-		player.mu.Unlock()
+	}
+
+	// Send unload packets (empty chunk with primary bit mask 0)
+	player.mu.Lock()
+	conn := player.Conn
+	player.mu.Unlock()
+
+	if conn != nil {
+		for _, pos := range toUnload {
+			pkt := protocol.MarshalPacket(0x21, func(w *bytes.Buffer) {
+				protocol.WriteInt32(w, pos.X)
+				protocol.WriteInt32(w, pos.Z)
+				protocol.WriteBool(w, true) // Ground-up continuous
+				protocol.WriteUint16(w, 0)  // Primary bit mask: 0 = unload
+				protocol.WriteVarInt(w, 0)  // Size: 0
+			})
+			protocol.WritePacket(conn, pkt)
+		}
 	}
 
 	// Update entity tracking (e.g. spawn players who just came into range)

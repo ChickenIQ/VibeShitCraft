@@ -97,3 +97,19 @@ func TestGeneratorDeterminismAcrossChunks(t *testing.T) {
 		}
 	}
 }
+
+func BenchmarkGenerator_GenerateChunkData(b *testing.B) {
+	gen := NewGenerator(123456789)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		gen.GenerateChunkData(i%10, i/10)
+	}
+}
+
+func BenchmarkGenerator_SurfaceHeight(b *testing.B) {
+	gen := NewGenerator(123456789)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		gen.SurfaceHeight(i%1000, i/1000)
+	}
+}

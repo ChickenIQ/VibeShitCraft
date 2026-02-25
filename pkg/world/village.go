@@ -1,18 +1,77 @@
 package world
 
+import "sync"
+
 // VillageGrid handles deterministic village placement on a sparse grid.
 // Every VILLAGE_CELL_SIZE blocks in X and Z forms a grid cell; each cell
 // independently rolls whether it contains a village center.
 const villageCellSize = 96
 
-// VillageGrid carries the world seed used for per-cell rolls.
-type VillageGrid struct {
-	seed int64
+// roadSegment represents one axis-aligned road segment in the village road tree.
+type roadSegment struct {
+	sx, sz, ex, ez int
+	horizontal     bool
+	children       []roadSegment
+	wobbleSeed     int
 }
 
-// NewVillageGrid creates a VillageGrid for the given world seed.
-func NewVillageGrid(seed int64) *VillageGrid {
-	return &VillageGrid{seed: seed}
+// bbox represents a 2D axis-aligned bounding box.
+type bbox struct {
+	minX, minZ, maxX, maxZ int
+}
+
+// VillagePlan encapsulates all deterministic layout data for a village.
+type VillagePlan struct {
+	VX, VZ    int // Well center
+	Roads     []roadSegment
+	Buildings []struct {
+		Site buildingSite
+		Type int
+		Box  bbox
+	}
+	Farms []struct {
+		X, Z int
+		Box  bbox
+	}
+}
+
+type buildingSite struct {
+	doorX, doorZ int
+	facing       int // 0=+Z, 1=-Z, 2=+X, 3=-X
+	smallOnly    bool
+}
+
+// VillageGrid carries the world seed used for per-cell rolls.
+type cellKey struct {
+	x, z int
+}
+
+type centerResult struct {
+	wx, wz int
+	ok     bool
+}
+
+type VillageGrid struct {
+	seed       int64
+	tempNoise  *Perlin
+	rainNoise  *Perlin
+	heightFunc func(x, z int) int
+
+	mu          sync.RWMutex
+	centerCache map[cellKey]centerResult
+	planCache   map[cellKey]*VillagePlan
+}
+
+// NewVillageGrid creates a VillageGrid for the given world seed and biome noise.
+func NewVillageGrid(seed int64, tempNoise, rainNoise *Perlin, heightFunc func(x, z int) int) *VillageGrid {
+	return &VillageGrid{
+		seed:        seed,
+		tempNoise:   tempNoise,
+		rainNoise:   rainNoise,
+		heightFunc:  heightFunc,
+		centerCache: make(map[cellKey]centerResult),
+		planCache:   make(map[cellKey]*VillagePlan),
+	}
 }
 
 // cellHash returns a deterministic value in [0, mod) for cell (cx, cz).
@@ -34,7 +93,25 @@ func (v *VillageGrid) cellHash(cx, cz, mod int64) int64 {
 // villageCenter returns the world-space (x, z) center of a village in grid cell
 // (cellX, cellZ), and ok=true if that cell contains a village (25% chance)
 // AND no neighboring village is too close (minimum 80 blocks apart).
-func (v *VillageGrid) villageCenter(cellX, cellZ int) (wx, wz int, ok bool) {
+func (v *VillageGrid) villageCenter(cellX, cellZ int) (int, int, bool) {
+	key := cellKey{cellX, cellZ}
+	v.mu.RLock()
+	if res, ok := v.centerCache[key]; ok {
+		v.mu.RUnlock()
+		return res.wx, res.wz, res.ok
+	}
+	v.mu.RUnlock()
+
+	wx, wz, ok := v.calculateVillageCenter(cellX, cellZ)
+
+	v.mu.Lock()
+	v.centerCache[key] = centerResult{wx, wz, ok}
+	v.mu.Unlock()
+
+	return wx, wz, ok
+}
+
+func (v *VillageGrid) calculateVillageCenter(cellX, cellZ int) (wx, wz int, ok bool) {
 	cx := int64(cellX)
 	cz := int64(cellZ)
 	// ~25% of cells get a village
@@ -84,6 +161,18 @@ func (v *VillageGrid) villageCenter(cellX, cellZ int) (wx, wz int, ok bool) {
 		}
 	}
 
+	// Check terrain height at center — don't build if overhanging water!
+	if v.heightFunc != nil {
+		// Check a 2-block radius around the center (well area)
+		for dx := -2; dx <= 2; dx++ {
+			for dz := -2; dz <= 2; dz++ {
+				if v.heightFunc(wx+dx, wz+dz) < 62 { // 62 is WaterLevel
+					return 0, 0, false
+				}
+			}
+		}
+	}
+
 	return wx, wz, true
 }
 
@@ -127,14 +216,15 @@ func (v *VillageGrid) generateVillage(chunkX, chunkZ, surfY int, sections *[Sect
 	}
 }
 
-// IsInVillage returns true if (wx, wz) is within the influence area of a village.
+// IsInVillage returns true if (wx, wz) is within the influence area of a village's ACTUAL structures.
 func (v *VillageGrid) IsInVillage(wx, wz int) bool {
-	// Decreased from 75 to 55 to allow trees/structures to spawn closer to villages
-	const influenceRadius = 55
-	cellMinX := divFloor(wx-influenceRadius, villageCellSize)
-	cellMaxX := divFloor(wx+influenceRadius, villageCellSize)
-	cellMinZ := divFloor(wz-influenceRadius, villageCellSize)
-	cellMaxZ := divFloor(wz+influenceRadius, villageCellSize)
+	// A rough "generous" radius to find likely candidate villages.
+	// 75 is the max extent of our road segments.
+	const searchRadius = 80
+	cellMinX := divFloor(wx-searchRadius, villageCellSize)
+	cellMaxX := divFloor(wx+searchRadius, villageCellSize)
+	cellMinZ := divFloor(wz-searchRadius, villageCellSize)
+	cellMaxZ := divFloor(wz+searchRadius, villageCellSize)
 
 	for cx := cellMinX; cx <= cellMaxX; cx++ {
 		for cz := cellMinZ; cz <= cellMaxZ; cz++ {
@@ -142,14 +232,590 @@ func (v *VillageGrid) IsInVillage(wx, wz int) bool {
 			if !ok {
 				continue
 			}
-			dx := wx - vx
-			dz := wz - vz
-			if dx >= -influenceRadius && dx <= influenceRadius && dz >= -influenceRadius && dz <= influenceRadius {
+
+			// Deterministically plan the village to check structure overlap
+			plan := v.planVillage(vx, vz)
+
+			// 1. Check Buildings & Farms (proximity 4 blocks)
+			for _, b := range plan.Buildings {
+				if wx >= b.Box.minX-4 && wx <= b.Box.maxX+4 &&
+					wz >= b.Box.minZ-4 && wz <= b.Box.maxZ+4 {
+					return true
+				}
+			}
+			for _, f := range plan.Farms {
+				if wx >= f.Box.minX-4 && wx <= f.Box.maxX+4 &&
+					wz >= f.Box.minZ-4 && wz <= f.Box.maxZ+4 {
+					return true
+				}
+			}
+
+			// 2. Check Roads (proximity 4 blocks)
+			if v.isNearRoad(wx, wz, plan.Roads, 4) {
+				return true
+			}
+
+			// 3. Check Well (at center, 4x4 + margin)
+			if wx >= vx-5 && wx <= vx+4 && wz >= vz-5 && wz <= vz+4 {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// ChunkInVillage returns true if the 16x16 chunk intersects any village structures.
+func (v *VillageGrid) ChunkInVillage(chunkX, chunkZ int) bool {
+	minWX := chunkX * 16
+	minWZ := chunkZ * 16
+	maxWX := minWX + 15
+	maxWZ := minWZ + 15
+
+	const searchRadius = 80
+	cellMinX := divFloor(minWX-searchRadius, villageCellSize)
+	cellMaxX := divFloor(maxWX+searchRadius, villageCellSize)
+	cellMinZ := divFloor(minWZ-searchRadius, villageCellSize)
+	cellMaxZ := divFloor(maxWZ+searchRadius, villageCellSize)
+
+	for cx := cellMinX; cx <= cellMaxX; cx++ {
+		for cz := cellMinZ; cz <= cellMaxZ; cz++ {
+			vx, vz, ok := v.villageCenter(cx, cz)
+			if !ok {
+				continue
+			}
+
+			plan := v.planVillage(vx, vz)
+
+			// 1. Check Buildings & Farms (proximity 4 blocks)
+			for _, b := range plan.Buildings {
+				if maxWX >= b.Box.minX-4 && minWX <= b.Box.maxX+4 &&
+					maxWZ >= b.Box.minZ-4 && minWZ <= b.Box.maxZ+4 {
+					return true
+				}
+			}
+			for _, f := range plan.Farms {
+				if maxWX >= f.Box.minX-4 && minWX <= f.Box.maxX+4 &&
+					maxWZ >= f.Box.minZ-4 && minWZ <= f.Box.maxZ+4 {
+					return true
+				}
+			}
+
+			// 2. Check Roads (proximity 4 blocks)
+			// For chunk box, just check the four corners and the center to be safe or use simple bounding box.
+			// Accurate intersection of AABB and road segments.
+			if v.isNearRoadChunk(minWX, minWZ, maxWX, maxWZ, plan.Roads, 4) {
+				return true
+			}
+
+			// 3. Check Well (at center, 4x4 + margin)
+			if maxWX >= vx-5 && minWX <= vx+4 && maxWZ >= vz-5 && minWZ <= vz+4 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isNearRoadChunk checks if any road segment overlaps the given chunk bounding box.
+func (v *VillageGrid) isNearRoadChunk(minWX, minWZ, maxWX, maxWZ int, segments []roadSegment, dist int) bool {
+	for _, seg := range segments {
+		minX, maxX := seg.sx, seg.ex
+		if minX > maxX {
+			minX, maxX = maxX, minX
+		}
+		minZ, maxZ := seg.sz, seg.ez
+		if minZ > maxZ {
+			minZ, maxZ = maxZ, minZ
+		}
+
+		if maxWX >= minX-dist && minWX <= maxX+dist && maxWZ >= minZ-dist && minWZ <= maxZ+dist {
+			return true
+		}
+
+		if v.isNearRoadChunk(minWX, minWZ, maxWX, maxWZ, seg.children, dist) {
+			return true
+		}
+	}
+	return false
+}
+
+// isNearRoad is a recursive helper to check if a point is near any road segment in the tree.
+func (v *VillageGrid) isNearRoad(wx, wz int, segments []roadSegment, dist int) bool {
+	abs := func(x int) int {
+		if x < 0 {
+			return -x
+		}
+		return x
+	}
+	for _, seg := range segments {
+		minX, maxX := seg.sx, seg.ex
+		if minX > maxX {
+			minX, maxX = maxX, minX
+		}
+		minZ, maxZ := seg.sz, seg.ez
+		if minZ > maxZ {
+			minZ, maxZ = maxZ, minZ
+		}
+
+		if seg.horizontal {
+			if wx >= minX-dist && wx <= maxX+dist && abs(wz-seg.sz) <= dist {
+				return true
+			}
+		} else {
+			if wz >= minZ-dist && wz <= maxZ+dist && abs(wx-seg.sx) <= dist {
+				return true
+			}
+		}
+
+		if v.isNearRoad(wx, wz, seg.children, dist) {
+			return true
+		}
+	}
+	return false
+}
+
+// planVillage creates the layout of a village deterministically.
+func (v *VillageGrid) planVillage(vx, vz int) *VillagePlan {
+	key := cellKey{vx, vz}
+	v.mu.RLock()
+	if plan, ok := v.planCache[key]; ok {
+		v.mu.RUnlock()
+		return plan
+	}
+	v.mu.RUnlock()
+
+	plan := v.calculateVillagePlan(vx, vz)
+
+	v.mu.Lock()
+	v.planCache[key] = plan
+	v.mu.Unlock()
+
+	return plan
+}
+
+func (v *VillageGrid) calculateVillagePlan(vx, vz int) *VillagePlan {
+	abs := func(x int) int {
+		if x < 0 {
+			return -x
+		}
+		return x
+	}
+	// Decide main arms
+	armPosX := v.cellHash(int64(vx)^0xA1, int64(vz)^0xB2, 4) < 3
+	armNegX := v.cellHash(int64(vx)^0xC3, int64(vz)^0xD4, 4) < 3
+	armPosZ := v.cellHash(int64(vx)^0xE5, int64(vz)^0xF6, 4) < 3
+	armNegZ := v.cellHash(int64(vx)^0x17, int64(vz)^0x28, 4) < 3
+	if !armPosX && !armNegX && !armPosZ && !armNegZ {
+		armPosX, armNegZ = true, true
+	}
+
+	var allSegmentsFlat []roadSegment
+	checkRoadCollision := func(psx, psz, pex, pez int, parentSx, parentSz int) bool {
+		minX, maxX := psx, pex
+		if minX > maxX {
+			minX, maxX = maxX, minX
+		}
+		minZ, maxZ := psz, pez
+		if minZ > maxZ {
+			minZ, maxZ = maxZ, minZ
+		}
+		pMinX, pMaxX := minX-12, maxX+12
+		pMinZ, pMaxZ := minZ-12, maxZ+12
+		for _, exSeg := range allSegmentsFlat {
+			eMinX, eMaxX := exSeg.sx, exSeg.ex
+			if eMinX > eMaxX {
+				eMinX, eMaxX = eMaxX, eMinX
+			}
+			eMinZ, eMaxZ := exSeg.sz, exSeg.ez
+			if eMinZ > eMaxZ {
+				eMinZ, eMaxZ = eMaxZ, eMinZ
+			}
+			if pMinX <= eMaxX && pMaxX >= eMinX && pMinZ <= eMaxZ && pMaxZ >= eMinZ {
+				if parentSx >= eMinX && parentSx <= eMaxX && parentSz >= eMinZ && parentSz <= eMaxZ {
+					continue
+				}
+				return true
+			}
+		}
+		return false
+	}
+
+	var generateBranch func(sx, sz int, horizontal bool, length, dir, depth, salt int, out *roadSegment) bool
+	generateBranch = func(sx, sz int, horizontal bool, length, dir, depth, salt int, out *roadSegment) bool {
+		var ex, ez int
+		if horizontal {
+			ex = sx + length*dir
+			ez = sz
+		} else {
+			ex = sx
+			ez = sz + length*dir
+		}
+		if depth < 2 && checkRoadCollision(sx, sz, ex, ez, sx, sz) {
+			return false
+		}
+		seg := roadSegment{sx: sx, sz: sz, ex: ex, ez: ez, horizontal: horizontal, wobbleSeed: salt}
+		allSegmentsFlat = append(allSegmentsFlat, seg)
+		if depth <= 0 || length < 10 {
+			*out = seg
+			return true
+		}
+		numAttempts := 1
+		if length >= 20 {
+			numAttempts = 2
+		}
+		for b := 0; b < numAttempts; b++ {
+			branchSalt := salt*31 + b*17 + depth*7
+			if v.cellHash(int64(branchSalt)^0xBB, int64(sx+sz+b), 10) < 4 {
+				continue
+			}
+			frac := int(v.cellHash(int64(branchSalt)^0xCC, int64(ex+ez), 40)) + 40
+			dist := length * frac / 100
+			if dist < 8 {
+				dist = 8
+			}
+			var bsx, bsz int
+			if horizontal {
+				bsx = sx + dist*dir
+				bsz = sz
+			} else {
+				bsx = sx
+				bsz = sz + dist*dir
+			}
+			bdir := 1
+			if v.cellHash(int64(branchSalt)^0xDD, int64(bsx+bsz), 2) == 0 {
+				bdir = -1
+			}
+			blen := int(v.cellHash(int64(branchSalt)^0xEE, int64(bsx-bsz), 15)) + 14
+			var child roadSegment
+			if generateBranch(bsx, bsz, !horizontal, blen, bdir, depth-1, branchSalt+1000, &child) {
+				seg.children = append(seg.children, child)
+			}
+		}
+		*out = seg
+		return true
+	}
+
+	mainLen := func(salt int) int {
+		return int(v.cellHash(int64(vx)^int64(salt), int64(vz)^int64(salt*3), 22)) + 24
+	}
+
+	var roads []roadSegment
+	if armPosX {
+		var s roadSegment
+		if generateBranch(vx, vz, true, mainLen(0x111), 1, 2, vx+1, &s) {
+			roads = append(roads, s)
+		}
+	}
+	if armNegX {
+		var s roadSegment
+		if generateBranch(vx, vz, true, mainLen(0x222), -1, 2, vx+2, &s) {
+			roads = append(roads, s)
+		}
+	}
+	if armPosZ {
+		var s roadSegment
+		if generateBranch(vx, vz, false, mainLen(0x333), 1, 2, vz+3, &s) {
+			roads = append(roads, s)
+		}
+	}
+	if armNegZ {
+		var s roadSegment
+		if generateBranch(vx, vz, false, mainLen(0x444), -1, 2, vz+4, &s) {
+			roads = append(roads, s)
+		}
+	}
+
+	var sites []buildingSite
+	var collectSites func(seg *roadSegment, depth int)
+	collectSites = func(seg *roadSegment, depth int) {
+		slen := abs(seg.ex-seg.sx) + abs(seg.ez-seg.sz)
+		if slen >= 10 {
+			sideHash := v.cellHash(int64(seg.ex)^0xF1, int64(seg.ez)^0xF2, 2)
+			off := 5
+			if sideHash == 0 {
+				off = -5
+			}
+			if seg.horizontal {
+				facing := 0
+				if off > 0 {
+					facing = 1
+				}
+				sites = append(sites, buildingSite{doorX: seg.ex, doorZ: seg.ez + off, facing: facing, smallOnly: depth > 0})
+			} else {
+				facing := 2
+				if off > 0 {
+					facing = 3
+				}
+				sites = append(sites, buildingSite{doorX: seg.ex + off, doorZ: seg.ez, facing: facing, smallOnly: depth > 0})
+			}
+		}
+		if slen >= 22 {
+			midHash := v.cellHash(int64(seg.sx+seg.ex)^0xA5, int64(seg.sz+seg.ez)^0xB6, 2)
+			off := 5
+			if midHash == 0 {
+				off = -5
+			}
+			mx, mz := (seg.sx+seg.ex)/2, (seg.sz+seg.ez)/2
+			if seg.horizontal {
+				facing := 0
+				if off > 0 {
+					facing = 1
+				}
+				sites = append(sites, buildingSite{doorX: mx, doorZ: mz + off, facing: facing, smallOnly: true})
+			} else {
+				facing := 2
+				if off > 0 {
+					facing = 3
+				}
+				sites = append(sites, buildingSite{doorX: mx + off, doorZ: mz, facing: facing, smallOnly: true})
+			}
+		}
+		for i := range seg.children {
+			collectSites(&seg.children[i], depth+1)
+		}
+	}
+	for i := range roads {
+		collectSites(&roads[i], 0)
+	}
+
+	plan := &VillagePlan{VX: vx, VZ: vz, Roads: roads}
+	var placed []bbox
+	var roadBBs []bbox
+	var collectRoadBBs func(seg *roadSegment)
+	collectRoadBBs = func(seg *roadSegment) {
+		if seg.horizontal {
+			minX, maxX := seg.sx, seg.ex
+			if minX > maxX {
+				minX, maxX = maxX, minX
+			}
+			roadBBs = append(roadBBs, bbox{minX, seg.sz - 2, maxX, seg.sz + 2})
+		} else {
+			minZ, maxZ := seg.sz, seg.ez
+			if minZ > maxZ {
+				minZ, maxZ = maxZ, minZ
+			}
+			roadBBs = append(roadBBs, bbox{seg.sx - 2, minZ, seg.sx + 2, maxZ})
+		}
+		for i := range seg.children {
+			collectRoadBBs(&seg.children[i])
+		}
+	}
+	for i := range roads {
+		collectRoadBBs(&roads[i])
+	}
+
+	var fallback []buildingSite
+	hasHall, hasChurch, hasMarket := false, false, false
+	for i, site := range sites {
+		h := v.cellHash(int64(site.doorX+i*7), int64(site.doorZ+i*13+3), 100)
+		if h < 20 {
+			fallback = append(fallback, site)
+			continue
+		}
+		stype := 1
+		if !site.smallOnly {
+			if h >= 90 && !hasHall {
+				stype = 2
+			} else if h >= 80 && !hasChurch {
+				stype = 3
+			} else if h >= 70 && !hasMarket {
+				stype = 4
+			}
+		}
+		var bx, bz, ex, ez int
+		switch stype {
+		case 1:
+			ax, az := doorToAnchorHouse(site.doorX, site.doorZ, site.facing)
+			bx, bz, ex, ez = ax-1, az-1, ax+6, az+6
+		case 2:
+			ax, az := doorToAnchorHall(site.doorX, site.doorZ, site.facing)
+			bx, bz, ex, ez = ax-1, az-1, ax+8, az+10
+		case 3:
+			ax, az := doorToAnchorChurch(site.doorX, site.doorZ, site.facing)
+			bx, bz, ex, ez = ax-1, az-1, ax+6, az+12
+		case 4:
+			ax, az := doorToAnchorMarketplace(site.doorX, site.doorZ, site.facing)
+			bx, bz, ex, ez = ax-1, az-1, ax+14, az+14
+		}
+		newB := bbox{bx, bz, ex, ez}
+		collides := false
+		for _, b := range placed {
+			if newB.minX <= b.maxX && newB.maxX >= b.minX && newB.minZ <= b.maxZ && newB.maxZ >= b.minZ {
+				collides = true
+				break
+			}
+		}
+		if !collides {
+			for _, r := range roadBBs {
+				if newB.minX <= r.maxX && newB.maxX >= r.minX && newB.minZ <= r.maxZ && newB.maxZ >= r.minZ {
+					collides = true
+					break
+				}
+			}
+		}
+		if collides {
+			fallback = append(fallback, site)
+			continue
+		}
+		if stype == 2 {
+			hasHall = true
+		} else if stype == 3 {
+			hasChurch = true
+		} else if stype == 4 {
+			hasMarket = true
+		}
+		placed = append(placed, newB)
+		plan.Buildings = append(plan.Buildings, struct {
+			Site buildingSite
+			Type int
+			Box  bbox
+		}{site, stype, newB})
+	}
+
+	for _, site := range fallback {
+		if len(placed) >= 5 {
+			break
+		}
+		ax, az := doorToAnchorHouse(site.doorX, site.doorZ, site.facing)
+		newB := bbox{ax - 1, az - 1, ax + 6, az + 6}
+		collides := false
+		for _, b := range placed {
+			if newB.minX <= b.maxX && newB.maxX >= b.minX && newB.minZ <= b.maxZ && newB.maxZ >= b.minZ {
+				collides = true
+				break
+			}
+		}
+		if !collides {
+			for _, r := range roadBBs {
+				if newB.minX <= r.maxX && newB.maxX >= r.minX && newB.minZ <= r.maxZ && newB.maxZ >= r.minZ {
+					collides = true
+					break
+				}
+			}
+		}
+		if !collides {
+			placed = append(placed, newB)
+			plan.Buildings = append(plan.Buildings, struct {
+				Site buildingSite
+				Type int
+				Box  bbox
+			}{site, 1, newB})
+		}
+	}
+
+	floc := []struct{ dx, dz int }{{-24, 14}, {8, -26}, {24, 14}, {-8, -32}, {30, -14}, {-28, -16}}
+	nfarms := int(v.cellHash(int64(vx), int64(vz), 4)) + 1
+	for i := len(floc) - 1; i > 0; i-- {
+		j := int(v.cellHash(int64(vx+i), int64(vz-i), int64(i+1)))
+		floc[i], floc[j] = floc[j], floc[i]
+	}
+	for i := 0; i < len(floc) && len(plan.Farms) < nfarms; i++ {
+		fx, fz := vx+floc[i].dx, vz+floc[i].dz
+		fB := bbox{fx - 4, fz - 4, fx + 4, fz + 4}
+		collides := false
+		for _, b := range placed {
+			if fB.minX <= b.maxX && fB.maxX >= b.minX && fB.minZ <= b.maxZ && fB.maxZ >= b.minZ {
+				collides = true
+				break
+			}
+		}
+		if !collides {
+			for _, r := range roadBBs {
+				if fB.minX <= r.maxX && fB.maxX >= r.minX && fB.minZ <= r.maxZ && fB.maxZ >= r.minZ {
+					collides = true
+					break
+				}
+			}
+		}
+		if !collides {
+			plan.Farms = append(plan.Farms, struct {
+				X, Z int
+				Box  bbox
+			}{fx, fz, fB})
+		}
+	}
+
+	pruneRoad := func(seg *roadSegment, isMain bool) bool {
+		var recurse func(s *roadSegment, main bool) bool
+		recurse = func(s *roadSegment, main bool) bool {
+			kept := s.children[:0]
+			for i := range s.children {
+				if recurse(&s.children[i], false) {
+					kept = append(kept, s.children[i])
+				}
+			}
+			s.children = kept
+			maxD := 0
+			checkP := func(px, pz int) {
+				if s.horizontal {
+					if abs(pz-s.sz) <= 12 {
+						d := px - s.sx
+						if s.ex < s.sx {
+							d = s.sx - px
+						}
+						if d >= -4 && d > maxD {
+							maxD = d
+						}
+					}
+				} else {
+					if abs(px-s.sx) <= 12 {
+						d := pz - s.sz
+						if s.ez < s.sz {
+							d = s.sz - pz
+						}
+						if d >= -4 && d > maxD {
+							maxD = d
+						}
+					}
+				}
+			}
+			for _, c := range s.children {
+				checkP(c.sx, c.sz)
+			}
+			for _, b := range plan.Buildings {
+				checkP(b.Site.doorX, b.Site.doorZ)
+			}
+			for _, f := range plan.Farms {
+				checkP(f.X, f.Z)
+			}
+			origL := abs(s.ex - s.sx)
+			if !s.horizontal {
+				origL = abs(s.ez - s.sz)
+			}
+			if maxD <= 0 && len(s.children) == 0 {
+				if main {
+					maxD = 3
+				} else {
+					return false
+				}
+			}
+			nL := maxD + 2
+			if nL > origL {
+				nL = origL
+			}
+			if s.horizontal {
+				if s.ex < s.sx {
+					s.ex = s.sx - nL
+				} else {
+					s.ex = s.sx + nL
+				}
+			} else {
+				if s.ez < s.sz {
+					s.ez = s.sz - nL
+				} else {
+					s.ez = s.sx + nL // BUG HERE in original? Should be seg.sz
+					s.ez = s.sz + nL
+				}
+			}
+			return true
+		}
+		return recurse(seg, isMain)
+	}
+	for i := range plan.Roads {
+		pruneRoad(&plan.Roads[i], true)
+	}
+
+	return plan
 }
 
 // setBlock is a helper that writes block state into the sections array, clamping
@@ -228,56 +894,47 @@ func doorToAnchorMarketplace(doorX, doorZ, facing int) (int, int) {
 	return doorX, doorZ
 }
 
-// roadSegment represents one axis-aligned road segment in the village road tree.
-// Roads branch off each other: each segment can have child branches that fork
-// perpendicular to the parent at some point along its length.
-type roadSegment struct {
-	// Start and end points (world coords). One of X or Z varies; the other is constant.
-	sx, sz, ex, ez int
-	// horizontal: true = varies along X (constant Z), false = varies along Z (constant X)
-	horizontal bool
-	// children forking off this segment
-	children []roadSegment
-	// wobbleSeed for gentle curvature
-	wobbleSeed int
-}
-
-// buildVillage places all structures for a village centered at (vx, vz, surfY)
-// into the sections array, writing only blocks that fall within this chunk.
 func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *[SectionsPerChunk][ChunkSectionSize]uint16) {
 	originX := chunkX * 16
 	originZ := chunkZ * 16
 
+	// Determine biome at village center for styling
+	biome := BiomeAt(v.tempNoise, v.rainNoise, vx, vz)
+
 	// Block IDs (state = id << 4)
 	const (
-		air          = 0
-		log          = 17 << 4  // oak log
-		cobble       = 4 << 4   // cobblestone
-		planks       = 5 << 4   // oak planks
-		gravel       = 13 << 4  // gravel (path)
-		glass        = 20 << 4  // glass pane (window)
-		fence        = 85 << 4  // oak fence
-		stoneBrick   = 98 << 4  // stone bricks (well walls)
-		cobbleWall   = 139 << 4 // cobblestone wall
-		waterSrc     = 9 << 4   // water (stationary)
-		torch        = 50 << 4  // torch
-		slab         = 44 << 4  // stone slab
-		oakSlab      = 126 << 4 // oak slab
-		oakStairs    = 53 << 4  // oak stairs
-		woodenDoor   = 64 << 4  // wooden door
-		farmland     = 60 << 4  // farmland
-		wheat        = 59 << 4  // wheat
-		carrot       = 141 << 4 // carrot
-		potato       = 142 << 4 // potato
-		melonStem    = 105 << 4 // melon stem
-		pumpkinStem  = 104 << 4 // pumpkin stem
-		melonBlock   = 103 << 4 // melon block
-		pumpkinBlock = 86 << 4  // pumpkin block
-		dandelion    = 37 << 4  // dandelion flower
-		poppy        = 38 << 4  // poppy flower
-		goldBlock    = 41 << 4  // gold block (bell)
-		bed          = 26 << 4  // bed
+		air          uint16 = 0
+		cobble       uint16 = 4 << 4   // cobblestone
+		glass        uint16 = 20 << 4  // glass pane (window)
+		fence        uint16 = 85 << 4  // oak fence (TODO: biome specific?)
+		stoneBrick   uint16 = 98 << 4  // stone bricks (well walls)
+		cobbleWall   uint16 = 139 << 4 // cobblestone wall
+		waterSrc     uint16 = 9 << 4   // water (stationary)
+		torch        uint16 = 50 << 4  // torch
+		slab         uint16 = 44 << 4  // stone slab
+		woodenDoor   uint16 = 64 << 4  // wooden door
+		farmland     uint16 = 60 << 4  // farmland
+		wheat        uint16 = 59 << 4  // wheat
+		carrot       uint16 = 141 << 4 // carrot
+		potato       uint16 = 142 << 4 // potato
+		melonStem    uint16 = 105 << 4 // melon stem
+		pumpkinStem  uint16 = 104 << 4 // pumpkin stem
+		melonBlock   uint16 = 103 << 4 // melon block
+		pumpkinBlock uint16 = 86 << 4  // pumpkin block
+		dandelion    uint16 = 37 << 4  // dandelion flower
+		poppy        uint16 = 38 << 4  // poppy flower
+		goldBlock    uint16 = 41 << 4  // gold block (bell)
+		bed          uint16 = 26 << 4  // bed
 	)
+
+	log := biome.VillageLog
+	planks := biome.VillagePlanks
+	pathBlock := biome.VillagePath
+	woodSlab := biome.VillageSlab
+	woodStairs := biome.VillageStairs
+	woodFence := biome.VillageFence
+	deco1 := biome.VillageDeco1
+	deco2 := biome.VillageDeco2
 
 	abs := func(x int) int {
 		if x < 0 {
@@ -290,28 +947,28 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		lx := wx - originX
 		lz := wz - originZ
 		setBlock(lx, y, lz, state, sections)
-	}
 
-	// isSafeToDecorate returns true if the block at (wx, y, wz) is air or gravel.
-	isSafeToDecorate := func(wx, y, wz int) bool {
-		lx := wx - originX
-		lz := wz - originZ
-		if y < 0 || y > 255 || lx < 0 || lx > 15 || lz < 0 || lz > 15 {
-			return false
+		// Foundation support: if this is at the base floor level (surfY),
+		// fill down to solid ground to avoid floating buildings.
+		if y == surfY {
+			for fy := y - 1; fy >= 0; fy-- {
+				sec, sy := fy/16, fy%16
+				if fy >= 0 && fy < 256 && lx >= 0 && lx < 16 && lz >= 0 && lz < 16 {
+					current := sections[sec][(sy*16+lz)*16+lx] >> 4
+					if current == 0 || current == 8 || current == 9 { // Air or Water
+						// Use cobblestone for foundation (or sandstone for desert)
+						fState := cobble
+						setBlock(lx, fy, lz, fState, sections)
+					} else {
+						break // Hit solid ground
+					}
+				} else {
+					break
+				}
+			}
 		}
-		sec := y / 16
-		sy := y % 16
-		currentState := sections[sec][(sy*16+lz)*16+lx]
-		return (currentState>>4) == 0 || (currentState>>4) == 13 // Air (0) or Gravel (13)
 	}
 
-	placeDecoration := func(wx, y, wz int, state uint16) {
-		if isSafeToDecorate(wx, y, wz) {
-			placeBlock(wx, y, wz, state)
-		}
-	}
-
-	// isSafeForPath returns true if the block at (wx, y, wz) is air, grass, or dirt.
 	isSafeForPath := func(wx, y, wz int) bool {
 		lx := wx - originX
 		lz := wz - originZ
@@ -322,630 +979,72 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 		sy := y % 16
 		currentState := sections[sec][(sy*16+lz)*16+lx]
 		id := currentState >> 4
-		return id == 0 || id == 2 || id == 3 || id == 13 // Air, Grass, Dirt, Gravel
+		return id == 0 || id == 2 || id == 3 || id == 13 || id == 12 || id == 80 || currentState == pathBlock // Air, Grass, Dirt, Gravel, Sand, Snow, or current path
 	}
 
 	placePath := func(wx, y, wz int, state uint16) {
 		if isSafeForPath(wx, y, wz) {
 			placeBlock(wx, y, wz, state)
-		}
-	}
-
-	// ------------------------------------------------------------------
-	// 1. Generate branching road tree
-	// ------------------------------------------------------------------
-	// Decide which main arms exist (2-4 directions from the well)
-	armPosX := v.cellHash(int64(vx)^0xA1, int64(vz)^0xB2, 4) < 3
-	armNegX := v.cellHash(int64(vx)^0xC3, int64(vz)^0xD4, 4) < 3
-	armPosZ := v.cellHash(int64(vx)^0xE5, int64(vz)^0xF6, 4) < 3
-	armNegZ := v.cellHash(int64(vx)^0x17, int64(vz)^0x28, 4) < 3
-
-	armCount := 0
-	if armPosX {
-		armCount++
-	}
-	if armNegX {
-		armCount++
-	}
-	if armPosZ {
-		armCount++
-	}
-	if armNegZ {
-		armCount++
-	}
-	if armCount < 2 {
-		armPosX = true
-		armNegZ = true
-	}
-
-	// We maintain a flat list of all generated segments to check for collisions/intersections.
-	// This prevents roads from looping back onto each other or running too close parallel.
-	var allSegmentsFlat []roadSegment
-
-	// Helper to check if a proposed segment bounding box gets too close (within 12 blocks)
-	// to any already generated segment, EXCEPT for the exact point where it forks from its parent.
-	checkRoadCollision := func(psx, psz, pex, pez int, parentSx, parentSz int) bool {
-		minX, maxX := psx, pex
-		if minX > maxX {
-			minX, maxX = maxX, minX
-		}
-		minZ, maxZ := psz, pez
-		if minZ > maxZ {
-			minZ, maxZ = maxZ, minZ
-		}
-
-		// Expand the proposed box by 12 blocks for clearance
-		pMinX, pMaxX := minX-12, maxX+12
-		pMinZ, pMaxZ := minZ-12, maxZ+12
-
-		for _, exSeg := range allSegmentsFlat {
-			eMinX, eMaxX := exSeg.sx, exSeg.ex
-			if eMinX > eMaxX {
-				eMinX, eMaxX = eMaxX, eMinX
-			}
-			eMinZ, eMaxZ := exSeg.sz, exSeg.ez
-			if eMinZ > eMaxZ {
-				eMinZ, eMaxZ = eMaxZ, eMinZ
-			}
-
-			// If bounding boxes overlap, it's a collision
-			if pMinX <= eMaxX && pMaxX >= eMinX && pMinZ <= eMaxZ && pMaxZ >= eMinZ {
-				// Exception: if the existing segment IS the parent segment we are branching from,
-				// they will obviously intersect. We loosely check if the collision is just the fork point.
-				// Since branches are perpendicular to parents, we just let it pass if this branch
-				// starts exactly ON the existing segment's axis. We can check if parentSx, parentSz
-				// falls ON the existing segment. (Simplification: if the branch origins lie on the exSeg, assume it's the parent).
-				if parentSx >= eMinX && parentSx <= eMaxX && parentSz >= eMinZ && parentSz <= eMaxZ {
-					continue
-				}
-				return true
-			}
-		}
-		return false
-	}
-
-	// generateBranch creates a road segment with potential child branches.
-	// depth limits recursion; salt provides deterministic variation.
-	// returns a boolean indicating if the segment was successfully created (no collision).
-	var generateBranch func(sx, sz int, horizontal bool, length, dir, depth, salt int, out *roadSegment) bool
-	generateBranch = func(sx, sz int, horizontal bool, length, dir, depth, salt int, out *roadSegment) bool {
-		var ex, ez int
-		if horizontal {
-			ex = sx + length*dir
-			ez = sz
 		} else {
-			ex = sx
-			ez = sz + length*dir
+			// If not safe, it might be above ground on a slope.
+			// Force place the path at surfY and fill below.
+			placeBlock(wx, y, wz, state)
 		}
+	}
 
-		// Only check collision for depth < 2 (branches). Main roads (depth==2) don't collide with each other.
-		if depth < 2 {
-			if checkRoadCollision(sx, sz, ex, ez, sx, sz) {
-				return false
-			}
+	isSafeToDecorate := func(wx, y, wz int) bool {
+		lx := wx - originX
+		lz := wz - originZ
+		if y < 0 || y > 255 || lx < 0 || lx > 15 || lz < 0 || lz > 15 {
+			return false
 		}
+		sec := y / 16
+		sy := y % 16
+		currentState := sections[sec][(sy*16+lz)*16+lx]
+		id := currentState >> 4
+		return id == 0 || id == 12 || id == 80 || id == 13 || currentState == pathBlock // Air, Sand, Snow, Gravel, or current path
+	}
 
-		seg := roadSegment{
-			sx: sx, sz: sz, ex: ex, ez: ez,
-			horizontal: horizontal,
-			wobbleSeed: salt,
+	placeDecoration := func(wx, y, wz int, state uint16) {
+		if isSafeToDecorate(wx, y, wz) {
+			placeBlock(wx, y, wz, state)
 		}
+	}
 
-		// Commit to flat list before generating children so children can check against us
-		allSegmentsFlat = append(allSegmentsFlat, seg)
+	// ------------------------------------------------------------------
+	// 1. Plan roads, buildings, and farms
+	// ------------------------------------------------------------------
+	plan := v.planVillage(vx, vz)
 
-		if depth <= 0 || length < 10 {
-			*out = seg
-			return true
+	// ------------------------------------------------------------------
+	// 2. Render Well (at center)
+	// ------------------------------------------------------------------
+	for dx := -3; dx <= 2; dx++ {
+		for dz := -3; dz <= 2; dz++ {
+			placePath(vx+dx, surfY, vz+dz, pathBlock)
 		}
-
-		// Try to spawn 1-2 branches along this segment
-		numBranchAttempts := 1
-		if length >= 20 {
-			numBranchAttempts = 2
-		}
-
-		for b := 0; b < numBranchAttempts; b++ {
-			branchSalt := salt*31 + b*17 + depth*7
-			// ~60% chance of a branch
-			if v.cellHash(int64(branchSalt)^0xBB, int64(sx+sz+b), 10) < 4 {
-				continue
-			}
-
-			// Where along the segment does the branch fork?
-			// Between 40%-80% of the way along
-			frac := int(v.cellHash(int64(branchSalt)^0xCC, int64(ex+ez), 40)) + 40
-			branchDist := length * frac / 100
-			if branchDist < 8 {
-				branchDist = 8
-			}
-
-			// Branch start point
-			var bsx, bsz int
-			if horizontal {
-				bsx = sx + branchDist*dir
-				bsz = sz
+	}
+	for dx := -2; dx <= 1; dx++ {
+		for dz := -2; dz <= 1; dz++ {
+			isCorner := (dx == -2 || dx == 1) && (dz == -2 || dz == 1)
+			isInner := (dx == -1 || dx == 0) && (dz == -1 || dz == 0)
+			placeBlock(vx+dx, surfY+1, vz+dz, stoneBrick)
+			if isCorner {
+				placeBlock(vx+dx, surfY+2, vz+dz, cobbleWall)
+				placeBlock(vx+dx, surfY+3, vz+dz, cobbleWall)
+				placeBlock(vx+dx, surfY+4, vz+dz, cobbleWall)
+			} else if isInner {
+				placeBlock(vx+dx, surfY+1, vz+dz, stoneBrick)
+				placeBlock(vx+dx, surfY+2, vz+dz, waterSrc)
 			} else {
-				bsx = sx
-				bsz = sz + branchDist*dir
+				placeBlock(vx+dx, surfY+2, vz+dz, stoneBrick)
 			}
-
-			// Branch goes perpendicular; pick direction (+1 or -1)
-			branchDir := 1
-			if v.cellHash(int64(branchSalt)^0xDD, int64(bsx+bsz), 2) == 0 {
-				branchDir = -1
-			}
-
-			// Branch length: 14-28 blocks
-			branchLen := int(v.cellHash(int64(branchSalt)^0xEE, int64(bsx-bsz), 15)) + 14
-
-			var child roadSegment
-			if generateBranch(bsx, bsz, !horizontal, branchLen, branchDir, depth-1, branchSalt+1000, &child) {
-				seg.children = append(seg.children, child)
-			}
-		}
-
-		*out = seg
-		return true
-	}
-
-	// Main road lengths: 24-45 blocks
-	mainLen := func(salt int) int {
-		return int(v.cellHash(int64(vx)^int64(salt), int64(vz)^int64(salt*3), 22)) + 24
-	}
-
-	var allSegments []roadSegment
-	if armPosX {
-		var seg roadSegment
-		generateBranch(vx, vz, true, mainLen(0x111), 1, 2, vx+1, &seg)
-		allSegments = append(allSegments, seg)
-	}
-	if armNegX {
-		var seg roadSegment
-		generateBranch(vx, vz, true, mainLen(0x222), -1, 2, vx+2, &seg)
-		allSegments = append(allSegments, seg)
-	}
-	if armPosZ {
-		var seg roadSegment
-		generateBranch(vx, vz, false, mainLen(0x333), 1, 2, vz+3, &seg)
-		allSegments = append(allSegments, seg)
-	}
-	if armNegZ {
-		var seg roadSegment
-		generateBranch(vx, vz, false, mainLen(0x444), -1, 2, vz+4, &seg)
-		allSegments = append(allSegments, seg)
-	}
-
-	// ------------------------------------------------------------------
-	// 2. Collect building sites from the road tree
-	// ------------------------------------------------------------------
-	type buildingSite struct {
-		doorX, doorZ int
-		facing       int // 0=+Z, 1=-Z, 2=+X, 3=-X
-		smallOnly    bool
-	}
-
-	var sites []buildingSite
-
-	// collectSites walks the road tree and places buildings at branch endpoints
-	// and midpoints of long segments.
-	var collectSites func(seg *roadSegment, depth int)
-	collectSites = func(seg *roadSegment, depth int) {
-		segLen := abs(seg.ex-seg.sx) + abs(seg.ez-seg.sz)
-
-		// Place a building at the far end of this segment (if long enough)
-		if segLen >= 10 {
-			// Building at the endpoint — door faces back toward the road
-			// Pick which side of the road the building is on
-			sideHash := v.cellHash(int64(seg.ex)^0xF1, int64(seg.ez)^0xF2, 2)
-			sideOffset := 5
-			if sideHash == 0 {
-				sideOffset = -5
-			}
-
-			if seg.horizontal {
-				// Road goes along X; place building to the +Z or -Z side
-				facing := 0 // door on +Z wall (building is on -Z side of road)
-				if sideOffset > 0 {
-					facing = 1 // door on -Z wall (building is on +Z side of road)
-				}
-				sites = append(sites, buildingSite{
-					doorX: seg.ex, doorZ: seg.ez + sideOffset,
-					facing: facing, smallOnly: depth > 0,
-				})
-			} else {
-				// Road goes along Z; place building to the +X or -X side
-				facing := 2 // door on +X wall
-				if sideOffset > 0 {
-					facing = 3 // door on -X wall
-				}
-				sites = append(sites, buildingSite{
-					doorX: seg.ex + sideOffset, doorZ: seg.ez,
-					facing: facing, smallOnly: depth > 0,
-				})
-			}
-		}
-
-		// For longer segments, also place a building near the midpoint
-		if segLen >= 22 {
-			midHash := v.cellHash(int64(seg.sx+seg.ex)^0xA5, int64(seg.sz+seg.ez)^0xB6, 2)
-			midSide := 5
-			if midHash == 0 {
-				midSide = -5
-			}
-
-			midX := (seg.sx + seg.ex) / 2
-			midZ := (seg.sz + seg.ez) / 2
-
-			if seg.horizontal {
-				facing := 0
-				if midSide > 0 {
-					facing = 1
-				}
-				sites = append(sites, buildingSite{
-					doorX: midX, doorZ: midZ + midSide,
-					facing: facing, smallOnly: true,
-				})
-			} else {
-				facing := 2
-				if midSide > 0 {
-					facing = 3
-				}
-				sites = append(sites, buildingSite{
-					doorX: midX + midSide, doorZ: midZ,
-					facing: facing, smallOnly: true,
-				})
-			}
-		}
-
-		// Recurse into children
-		for i := range seg.children {
-			collectSites(&seg.children[i], depth+1)
-		}
-	}
-
-	for i := range allSegments {
-		collectSites(&allSegments[i], 0)
-	}
-
-	// ------------------------------------------------------------------
-	// 3. Decide building types for each site
-	// ------------------------------------------------------------------
-	type bbox struct{ minX, minZ, maxX, maxZ int }
-	var placedBuildings []bbox
-
-	type slotDecision struct {
-		site       buildingSite
-		structType int // 1=house, 2=hall, 3=church, 4=marketplace
-	}
-	var activeSlots []slotDecision
-	hasHall := false
-	hasChurch := false
-	hasMarket := false
-
-	// Collect road bounding boxes for building-vs-road collision
-	var roadBBs []bbox
-	var collectRoadBBs func(seg *roadSegment)
-	collectRoadBBs = func(seg *roadSegment) {
-		if seg.horizontal {
-			minX, maxX := seg.sx, seg.ex
-			if minX > maxX {
-				minX, maxX = maxX, minX
-			}
-			roadBBs = append(roadBBs, bbox{minX, seg.sz - 2, maxX, seg.sz + 2})
-		} else {
-			minZ, maxZ := seg.sz, seg.ez
-			if minZ > maxZ {
-				minZ, maxZ = maxZ, minZ
-			}
-			roadBBs = append(roadBBs, bbox{seg.sx - 2, minZ, seg.sx + 2, maxZ})
-		}
-		for i := range seg.children {
-			collectRoadBBs(&seg.children[i])
-		}
-	}
-	for i := range allSegments {
-		collectRoadBBs(&allSegments[i])
-	}
-
-	// We want to ensure at least 5 buildings spawn if possible.
-	var fallbackSites []buildingSite
-
-	for i, site := range sites {
-		slotHash := v.cellHash(int64(site.doorX+i*7), int64(site.doorZ+i*13+3), 100)
-		if slotHash < 20 {
-			fallbackSites = append(fallbackSites, site)
-			continue // ~20% chance to skip — not every site gets a building initially
-		}
-
-		structType := 1
-		if !site.smallOnly {
-			if slotHash >= 90 && !hasHall {
-				structType = 2
-			} else if slotHash >= 80 && !hasChurch {
-				structType = 3
-			} else if slotHash >= 70 && !hasMarket {
-				structType = 4
-			}
-		}
-
-		// Compute bounding box for collision check
-		doorX, doorZ := site.doorX, site.doorZ
-		var bx, bz, ex, ez int
-		switch structType {
-		case 1:
-			hx, hz := doorToAnchorHouse(doorX, doorZ, site.facing)
-			bx, bz, ex, ez = hx-1, hz-1, hx+6, hz+6
-		case 2:
-			hx, hz := doorToAnchorHall(doorX, doorZ, site.facing)
-			bx, bz, ex, ez = hx-1, hz-1, hx+8, hz+10
-		case 3:
-			hx, hz := doorToAnchorChurch(doorX, doorZ, site.facing)
-			bx, bz, ex, ez = hx-1, hz-1, hx+6, hz+12
-		case 4:
-			hx, hz := doorToAnchorMarketplace(doorX, doorZ, site.facing)
-			bx, bz, ex, ez = hx-1, hz-1, hx+14, hz+14 // 13x13 footprint
-		}
-
-		// Check for collision with already-placed buildings AND road segments
-		newBB := bbox{bx, bz, ex, ez}
-		collides := false
-		for _, bb := range placedBuildings {
-			if newBB.minX <= bb.maxX && newBB.maxX >= bb.minX &&
-				newBB.minZ <= bb.maxZ && newBB.maxZ >= bb.minZ {
-				collides = true
-				break
-			}
-		}
-		if !collides {
-			for _, rbb := range roadBBs {
-				if newBB.minX <= rbb.maxX && newBB.maxX >= rbb.minX &&
-					newBB.minZ <= rbb.maxZ && newBB.maxZ >= rbb.minZ {
-					collides = true
-					break
-				}
-			}
-		}
-		if collides {
-			fallbackSites = append(fallbackSites, site)
-			continue
-		}
-
-		// Mark unique buildings as spawned since they passed collision
-		if structType == 2 {
-			hasHall = true
-		} else if structType == 3 {
-			hasChurch = true
-		} else if structType == 4 {
-			hasMarket = true
-		}
-
-		placedBuildings = append(placedBuildings, newBB)
-		activeSlots = append(activeSlots, slotDecision{site, structType})
-	}
-
-	// Rescue loop: if we have fewer than 5 buildings, aggressively try the fallback sites
-	for _, site := range fallbackSites {
-		if len(placedBuildings) >= 5 {
-			break
-		}
-
-		structType := 1 // Only rescue basic houses
-		doorX, doorZ := site.doorX, site.doorZ
-		hx, hz := doorToAnchorHouse(doorX, doorZ, site.facing)
-		bx, bz, ex, ez := hx-1, hz-1, hx+6, hz+6
-
-		newBB := bbox{bx, bz, ex, ez}
-		collides := false
-		for _, bb := range placedBuildings {
-			if newBB.minX <= bb.maxX && newBB.maxX >= bb.minX &&
-				newBB.minZ <= bb.maxZ && newBB.maxZ >= bb.minZ {
-				collides = true
-				break
-			}
-		}
-		if !collides {
-			for _, rbb := range roadBBs {
-				if newBB.minX <= rbb.maxX && newBB.maxX >= rbb.minX &&
-					newBB.minZ <= rbb.maxZ && newBB.maxZ >= rbb.minZ {
-					collides = true
-					break
-				}
-			}
-		}
-		if !collides {
-			placedBuildings = append(placedBuildings, newBB)
-			activeSlots = append(activeSlots, slotDecision{site, structType})
+			placeBlock(vx+dx, surfY+5, vz+dz, slab)
 		}
 	}
 
 	// ------------------------------------------------------------------
-	// 4. Place farms (same locations, collision-checked)
-	// ------------------------------------------------------------------
-	farmLocations := []struct{ dx, dz int }{
-		{-24, 14},
-		{8, -26},
-		{24, 14},
-		{-8, -32},
-		{30, -14},
-		{-28, -16},
-	}
-	numFarms := int(v.cellHash(int64(vx), int64(vz), 4)) + 1
-	if numFarms > len(farmLocations) {
-		numFarms = len(farmLocations)
-	}
-	for i := len(farmLocations) - 1; i > 0; i-- {
-		j := int(v.cellHash(int64(vx+i), int64(vz-i), int64(i+1)))
-		farmLocations[i], farmLocations[j] = farmLocations[j], farmLocations[i]
-	}
-
-	type placedFarm struct{ dx, dz int }
-	var activeFarms []placedFarm
-
-	// Ensure at least 1 farm is placed if possible
-	targetFarms := numFarms
-	if targetFarms < 1 {
-		targetFarms = 1
-	}
-
-	for i := 0; i < len(farmLocations); i++ {
-		if len(activeFarms) >= targetFarms {
-			break
-		}
-		fdx, fdz := farmLocations[i].dx, farmLocations[i].dz
-		fx, fz := vx+fdx, vz+fdz
-		farmBB := bbox{fx - 4, fz - 4, fx + 4, fz + 4}
-		collides := false
-		for _, bb := range placedBuildings {
-			if farmBB.minX <= bb.maxX && farmBB.maxX >= bb.minX &&
-				farmBB.minZ <= bb.maxZ && farmBB.maxZ >= bb.minZ {
-				collides = true
-				break
-			}
-		}
-		if !collides {
-			for _, rbb := range roadBBs {
-				if farmBB.minX <= rbb.maxX && farmBB.maxX >= rbb.minX &&
-					farmBB.minZ <= rbb.maxZ && farmBB.maxZ >= rbb.minZ {
-					collides = true
-					break
-				}
-			}
-		}
-		if !collides {
-			activeFarms = append(activeFarms, placedFarm{fdx, fdz})
-		}
-	}
-
-	// ------------------------------------------------------------------
-	// 5. Prune road branches that don't lead to any building
-	// ------------------------------------------------------------------
-	// Build a set of placed building door positions for quick lookup
-	type point struct{ x, z int }
-	buildingDoors := make(map[point]bool)
-	for _, sd := range activeSlots {
-		buildingDoors[point{sd.site.doorX, sd.site.doorZ}] = true
-	}
-
-	// pruneRoad removes or shortens child branches that extend past the last building/farm.
-	// Returns true if this segment itself should be kept (it has a building/farm or kept children).
-	var pruneRoad func(seg *roadSegment, isMain bool) bool
-	pruneRoad = func(seg *roadSegment, isMain bool) bool {
-		// First, recurse into children and prune them
-		kept := seg.children[:0]
-		for i := range seg.children {
-			if pruneRoad(&seg.children[i], false) {
-				kept = append(kept, seg.children[i])
-			}
-		}
-		seg.children = kept
-
-		// We need to find the furthest point along this segment's axis that is actually needed.
-		// A segment is needed up to the coordinate of:
-		// - Its furthest surviving child branch
-		// - Its furthest served building door
-		// - Its furthest served farm center
-
-		// Start with the origin of the segment as the "min required distance"
-		maxDist := 0
-
-		// Helper to check if a point (px, pz) needs this segment (is within 12 blocks of it perpendicularly)
-		// and update maxDist if so.
-		checkPoint := func(px, pz int) {
-			if seg.horizontal {
-				// Seg goes along X (constant Z)
-				// Is it near our Z-axis?
-				if abs(pz-seg.sz) <= 12 {
-					// Is it along our X-span?
-					dist := px - seg.sx
-					if seg.ex < seg.sx {
-						dist = seg.sx - px // going negative X
-					}
-					if dist >= -4 { // a little backwards leniency for off-center doors
-						if dist > maxDist {
-							maxDist = dist
-						}
-					}
-				}
-			} else {
-				// Seg goes along Z (constant X)
-				if abs(px-seg.sx) <= 12 {
-					dist := pz - seg.sz
-					if seg.ez < seg.sz {
-						dist = seg.sz - pz // going negative Z
-					}
-					if dist >= -4 {
-						if dist > maxDist {
-							maxDist = dist
-						}
-					}
-				}
-			}
-		}
-
-		// 1. Children
-		for _, child := range seg.children {
-			checkPoint(child.sx, child.sz)
-		}
-
-		// 2. Buildings
-		for _, sd := range activeSlots {
-			checkPoint(sd.site.doorX, sd.site.doorZ)
-		}
-
-		// 3. Farms
-		for _, f := range activeFarms {
-			checkPoint(vx+f.dx, vz+f.dz)
-		}
-
-		// Original intended length
-		originalLen := abs(seg.ex - seg.sx)
-		if !seg.horizontal {
-			originalLen = abs(seg.ez - seg.sz)
-		}
-
-		// If maxDist is 0 and we aren't a main road with children, we can kill this branch.
-		// (Main roads from well are allowed to be 3 blocks long just to have a tiny stub if we want,
-		// but let's prune completely empty ones too.)
-		if maxDist <= 0 && len(seg.children) == 0 {
-			// Actually, if it's a main road, give it a tiny 3-block stub so the well doesn't awkwardly end
-			if isMain {
-				maxDist = 3
-			} else {
-				return false
-			}
-		}
-
-		// Truncate segment if maxDist is less than intended length
-		// Add +2 to the required distance so the road extends slightly past the building door
-		newLen := maxDist + 2
-		if newLen > originalLen {
-			newLen = originalLen
-		}
-
-		if seg.horizontal {
-			if seg.ex < seg.sx {
-				seg.ex = seg.sx - newLen
-			} else {
-				seg.ex = seg.sx + newLen
-			}
-		} else {
-			if seg.ez < seg.sz {
-				seg.ez = seg.sz - newLen
-			} else {
-				seg.ez = seg.sz + newLen
-			}
-		}
-
-		return true
-	}
-
-	for i := range allSegments {
-		pruneRoad(&allSegments[i], true)
-	}
-
-	// ------------------------------------------------------------------
-	// 6. Render all road segments (walk tree, place 3-wide gravel with wobble)
+	// 3. Render all road segments
 	// ------------------------------------------------------------------
 	wobble := func(d, seed int) int {
 		drift := 0
@@ -976,7 +1075,7 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 				d := abs(x - seg.sx)
 				wo := wobble(d, seg.wobbleSeed)
 				for w := -1; w <= 1; w++ {
-					placePath(x, surfY, seg.sz+w+wo, gravel)
+					placePath(x, surfY, seg.sz+w+wo, pathBlock)
 				}
 			}
 		} else {
@@ -988,7 +1087,7 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 				d := abs(z - seg.sz)
 				wo := wobble(d, seg.wobbleSeed)
 				for w := -1; w <= 1; w++ {
-					placePath(seg.sx+w+wo, surfY, z, gravel)
+					placePath(seg.sx+w+wo, surfY, z, pathBlock)
 				}
 			}
 		}
@@ -996,164 +1095,124 @@ func (v *VillageGrid) buildVillage(vx, vz, surfY, chunkX, chunkZ int, sections *
 			renderRoad(&seg.children[i])
 		}
 	}
-
-	for i := range allSegments {
-		renderRoad(&allSegments[i])
+	for i := range plan.Roads {
+		renderRoad(&plan.Roads[i])
 	}
 
 	// ------------------------------------------------------------------
-	// 6. Well (at center)
+	// 4. Place buildings at decided sites
 	// ------------------------------------------------------------------
-	for dx := -3; dx <= 2; dx++ {
-		for dz := -3; dz <= 2; dz++ {
-			placePath(vx+dx, surfY, vz+dz, gravel)
-		}
-	}
-	for dx := -2; dx <= 1; dx++ {
-		for dz := -2; dz <= 1; dz++ {
-			isCorner := (dx == -2 || dx == 1) && (dz == -2 || dz == 1)
-			isInner := (dx == -1 || dx == 0) && (dz == -1 || dz == 0)
-			placeBlock(vx+dx, surfY+1, vz+dz, stoneBrick)
-			if isCorner {
-				placeBlock(vx+dx, surfY+2, vz+dz, cobbleWall)
-				placeBlock(vx+dx, surfY+3, vz+dz, cobbleWall)
-				placeBlock(vx+dx, surfY+4, vz+dz, cobbleWall)
-			} else if isInner {
-				placeBlock(vx+dx, surfY+1, vz+dz, stoneBrick)
-				placeBlock(vx+dx, surfY+2, vz+dz, waterSrc)
-			} else {
-				placeBlock(vx+dx, surfY+2, vz+dz, stoneBrick)
-			}
-			placeBlock(vx+dx, surfY+5, vz+dz, slab)
-		}
-	}
-
-	// ------------------------------------------------------------------
-	// 7. Place buildings at decided sites
-	// ------------------------------------------------------------------
-	for _, sd := range activeSlots {
-		doorX := sd.site.doorX
-		doorZ := sd.site.doorZ
-
-		switch sd.structType {
+	for _, b := range plan.Buildings {
+		dx, dz, fac := b.Site.doorX, b.Site.doorZ, b.Site.facing
+		switch b.Type {
 		case 1:
-			hx, hz := doorToAnchorHouse(doorX, doorZ, sd.site.facing)
-			v.buildHouse(hx, hz, surfY, sd.site.facing, placeBlock, log, planks, cobble, glass, fence, torch, oakStairs, woodenDoor, air, oakSlab, bed)
+			hx, hz := doorToAnchorHouse(dx, dz, fac)
+			v.buildHouse(hx, hz, surfY, fac, placeBlock, log, planks, cobble, glass, woodFence, torch, woodStairs, woodenDoor, air, woodSlab, bed)
 		case 2:
-			hx, hz := doorToAnchorHall(doorX, doorZ, sd.site.facing)
-			v.buildLargeHall(hx, hz, surfY, sd.site.facing, placeBlock, log, planks, cobble, glass, torch, oakStairs, woodenDoor, air, oakSlab, bed)
+			hx, hz := doorToAnchorHall(dx, dz, fac)
+			v.buildLargeHall(hx, hz, surfY, fac, placeBlock, log, planks, cobble, glass, torch, woodStairs, woodenDoor, air, woodSlab, bed)
 		case 3:
-			hx, hz := doorToAnchorChurch(doorX, doorZ, sd.site.facing)
-			v.buildChurch(hx, hz, surfY, sd.site.facing, placeBlock, log, planks, cobble, glass, torch, oakStairs, woodenDoor, slab, air, goldBlock)
+			hx, hz := doorToAnchorChurch(dx, dz, fac)
+			v.buildChurch(hx, hz, surfY, fac, placeBlock, log, planks, cobble, glass, torch, woodStairs, woodenDoor, slab, air, goldBlock, woodFence)
 		case 4:
-			hx, hz := doorToAnchorMarketplace(doorX, doorZ, sd.site.facing)
-			v.buildMarketplace(hx, hz, surfY, sd.site.facing, placeBlock, log, fence, oakSlab, gravel, torch, air)
+			hx, hz := doorToAnchorMarketplace(dx, dz, fac)
+			v.buildMarketplace(hx, hz, surfY, fac, placeBlock, log, woodFence, woodSlab, pathBlock, torch, air)
 		}
-
-		// Gravel path from door to nearest road point (3 blocks wide)
-		pathWidth := 1
-		switch sd.site.facing {
+		pw := 1
+		switch fac {
 		case 0:
-			for z := doorZ; z <= doorZ+6; z++ {
-				for w := -pathWidth; w <= pathWidth; w++ {
-					placePath(doorX+w, surfY, z, gravel)
+			for z := dz; z <= dz+6; z++ {
+				for w := -pw; w <= pw; w++ {
+					placePath(dx+w, surfY, z, pathBlock)
 				}
 			}
 		case 1:
-			for z := doorZ - 6; z <= doorZ; z++ {
-				for w := -pathWidth; w <= pathWidth; w++ {
-					placePath(doorX+w, surfY, z, gravel)
+			for z := dz - 6; z <= dz; z++ {
+				for w := -pw; w <= pw; w++ {
+					placePath(dx+w, surfY, z, pathBlock)
 				}
 			}
 		case 2:
-			for x := doorX; x <= doorX+6; x++ {
-				for w := -pathWidth; w <= pathWidth; w++ {
-					placePath(x, surfY, doorZ+w, gravel)
+			for x := dx; x <= dx+6; x++ {
+				for w := -pw; w <= pw; w++ {
+					placePath(x, surfY, dz+w, pathBlock)
 				}
 			}
 		case 3:
-			for x := doorX - 6; x <= doorX; x++ {
-				for w := -pathWidth; w <= pathWidth; w++ {
-					placePath(x, surfY, doorZ+w, gravel)
+			for x := dx - 6; x <= dx; x++ {
+				for w := -pw; w <= pw; w++ {
+					placePath(x, surfY, dz+w, pathBlock)
 				}
 			}
 		}
 	}
 
 	// ------------------------------------------------------------------
-	// 8. Place farms
+	// 5. Place farms
 	// ------------------------------------------------------------------
-	for _, f := range activeFarms {
-		fx, fz := vx+f.dx, vz+f.dz
-		farmHash := v.cellHash(int64(fx), int64(fz), 10)
-
-		if farmHash < 7 {
-			crops := []uint16{wheat, carrot, potato}
-			v.buildFarm(fx, fz, surfY, placeBlock, log, waterSrc, farmland, crops[farmHash%3])
+	for _, f := range plan.Farms {
+		fx, fz := f.X, f.Z
+		fh := v.cellHash(int64(fx), int64(fz), 10)
+		if fh < 7 {
+			cr := []uint16{wheat, carrot, potato}
+			v.buildFarm(fx, fz, surfY, placeBlock, log, waterSrc, farmland, cr[fh%3])
 		} else {
-			fruits := []uint16{melonBlock, pumpkinBlock}
-			stems := []uint16{melonStem, pumpkinStem}
-			idx := int(farmHash % 2)
-			v.buildFruitFarm(fx, fz, surfY, placeBlock, log, waterSrc, farmland, stems[idx], fruits[idx])
+			fr := []uint16{melonBlock, pumpkinBlock}
+			st := []uint16{melonStem, pumpkinStem}
+			idx := int(fh % 2)
+			v.buildFruitFarm(fx, fz, surfY, placeBlock, log, waterSrc, farmland, st[idx], fr[idx])
 		}
 	}
 
 	// ------------------------------------------------------------------
-	// 9. Decorations: Flowers & Lamp Posts along road segments
+	// 6. Decorations
 	// ------------------------------------------------------------------
 	for i := -40; i <= 40; i += 7 {
 		for j := -40; j <= 40; j += 7 {
 			h := int64(i*131 + j*17)
 			if h%5 == 0 {
-				flower := dandelion
+				var fl uint16 = deco1
 				if h%10 == 0 {
-					flower = poppy
+					fl = deco2
 				}
-				placeDecoration(vx+i, surfY+1, vz+j, uint16(flower))
+				placeDecoration(vx+i, surfY+1, vz+j, fl)
 			}
 		}
 	}
-
-	// Lamp posts along all road segments at regular intervals
 	var placeLamps func(seg *roadSegment)
 	placeLamps = func(seg *roadSegment) {
-		segLen := abs(seg.ex-seg.sx) + abs(seg.ez-seg.sz)
-
-		for dist := 8; dist <= segLen-2; dist += 10 {
+		slen := abs(seg.ex-seg.sx) + abs(seg.ez-seg.sz)
+		for dist := 8; dist <= slen-2; dist += 10 {
 			var px, pz int
 			if seg.horizontal {
 				dir := 1
 				if seg.ex < seg.sx {
 					dir = -1
 				}
-				px = seg.sx + dist*dir
-				pz = seg.sz + 2
+				px, pz = seg.sx+dist*dir, seg.sz+2
 			} else {
 				dir := 1
 				if seg.ez < seg.sz {
 					dir = -1
 				}
-				px = seg.sx + 2
-				pz = seg.sz + dist*dir
+				px, pz = seg.sx+2, seg.sz+dist*dir
 			}
 			placeDecoration(px, surfY+1, pz, fence)
 			placeDecoration(px, surfY+2, pz, fence)
 			placeDecoration(px, surfY+3, pz, fence)
 			placeDecoration(px, surfY+4, pz, torch|5)
 		}
-
 		for i := range seg.children {
 			placeLamps(&seg.children[i])
 		}
 	}
-
-	for i := range allSegments {
-		placeLamps(&allSegments[i])
+	for i := range plan.Roads {
+		placeLamps(&plan.Roads[i])
 	}
 }
 
-// buildMarketplace creates a 13x13 open market with 4 log-and-slab stalls and a gravel cross in the middle.
-func (v *VillageGrid) buildMarketplace(hx, hz, surfY, facing int, place func(wx, y, wz int, state uint16), log, fence, oakSlab, gravel, torch, air uint16) {
+// buildMarketplace creates an open market with 4 stall structures and a central path cross.
+func (v *VillageGrid) buildMarketplace(hx, hz, surfY, facing int, place func(wx, y, wz int, state uint16), log, fence, woodSlab, pathBlock, torch, air uint16) {
 	// 13x13 bounding box. Clear footprint first.
 	for dx := 0; dx < 13; dx++ {
 		for dz := 0; dz < 13; dz++ {
@@ -1169,19 +1228,19 @@ func (v *VillageGrid) buildMarketplace(hx, hz, surfY, facing int, place func(wx,
 		// Vertical layout. Gravel from X=2..10, Z=0..12
 		for dx := 2; dx <= 10; dx++ {
 			for dz := 0; dz <= 12; dz++ {
-				place(hx+dx, surfY, hz+dz, gravel)
+				place(hx+dx, surfY, hz+dz, pathBlock)
 			}
 		}
 	} else {
 		// Horizontal layout. Gravel from X=0..12, Z=2..10
 		for dx := 0; dx <= 12; dx++ {
 			for dz := 2; dz <= 10; dz++ {
-				place(hx+dx, surfY, hz+dz, gravel)
+				place(hx+dx, surfY, hz+dz, pathBlock)
 			}
 		}
 	}
 
-	upperSlab := oakSlab | 8 // meta 8 to make it upper slab
+	upperSlab := woodSlab | 8 // meta 8 to make it upper slab
 
 	// Function to generate a dynamic stall facing the specified axis
 	buildStall := func(startX, startZ, w, l, frontDx, frontDz int) {
@@ -1197,7 +1256,7 @@ func (v *VillageGrid) buildMarketplace(hx, hz, surfY, facing int, place func(wx,
 				}
 
 				// Roof (covers entire stall)
-				place(hx+startX+dx, surfY+4, hz+startZ+dz, oakSlab)
+				place(hx+startX+dx, surfY+4, hz+startZ+dz, woodSlab)
 
 				// Counter (upper slab). Forms a U-shape open at the back.
 				if !isCorner {
@@ -1292,7 +1351,7 @@ func (v *VillageGrid) buildFruitFarm(fx, fz, surfY int, place func(wx, y, wz int
 
 // buildLargeHall creates a 7x9 building with a solid symmetrical facade.
 // facing: 0=door on +Z wall, 1=door on -Z wall
-func (v *VillageGrid) buildLargeHall(hx, hz, surfY, facing int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, torch, stairs, door, air, oakSlab, bed uint16) {
+func (v *VillageGrid) buildLargeHall(hx, hz, surfY, facing int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, torch, stairs, door, air, woodSlab, bed uint16) {
 	const w, l = 7, 9
 	const h = 4
 
@@ -1372,7 +1431,7 @@ func (v *VillageGrid) buildLargeHall(hx, hz, surfY, facing int, place func(wx, y
 		place(hx+2, surfY+h+4, hz+dz, stairs|0)
 		place(hx+w-3, surfY+h+4, hz+dz, stairs|1)
 
-		place(hx+3, surfY+h+5, hz+dz, oakSlab)
+		place(hx+3, surfY+h+5, hz+dz, woodSlab)
 
 		if dz == 0 || dz == l-1 {
 			for dy := 1; dy <= 4; dy++ {
@@ -1394,7 +1453,7 @@ func (v *VillageGrid) buildLargeHall(hx, hz, surfY, facing int, place func(wx, y
 
 // buildHouse places a 5x5 plank house with a solid symmetrical facade.
 // facing: 0=door on +Z wall, 1=door on -Z wall, 2=door on +X wall, 3=door on -X wall
-func (v *VillageGrid) buildHouse(hx, hz, surfY, facing int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, fence, torch, stairs, door, air, oakSlab, bed uint16) {
+func (v *VillageGrid) buildHouse(hx, hz, surfY, facing int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, fence, torch, stairs, door, air, woodSlab, bed uint16) {
 	const w = 5
 	const h = 3
 
@@ -1490,7 +1549,7 @@ func (v *VillageGrid) buildHouse(hx, hz, surfY, facing int, place func(wx, y, wz
 			place(hx+dx, surfY+h+2, hz+w-1, stairs|3)
 			place(hx+dx, surfY+h+3, hz+1, stairs|2)
 			place(hx+dx, surfY+h+3, hz+3, stairs|3)
-			place(hx+dx, surfY+h+4, hz+2, oakSlab)
+			place(hx+dx, surfY+h+4, hz+2, woodSlab)
 
 			if dx == 0 || dx == w-1 {
 				for dy := 1; dy <= 3; dy++ {
@@ -1513,7 +1572,7 @@ func (v *VillageGrid) buildHouse(hx, hz, surfY, facing int, place func(wx, y, wz
 			place(hx+w-1, surfY+h+2, hz+dz, stairs|1)
 			place(hx+1, surfY+h+3, hz+dz, stairs|0)
 			place(hx+3, surfY+h+3, hz+dz, stairs|1)
-			place(hx+2, surfY+h+4, hz+dz, oakSlab)
+			place(hx+2, surfY+h+4, hz+dz, woodSlab)
 
 			if dz == 0 || dz == w-1 {
 				for dy := 1; dy <= 3; dy++ {
@@ -1533,7 +1592,7 @@ func (v *VillageGrid) buildHouse(hx, hz, surfY, facing int, place func(wx, y, wz
 // buildChurch creates a polished village church with a ground-level entrance and open belfry.
 // facing: 0=door on +Z wall, 1=door on -Z wall.
 // For facing=0 the entire structure is mirrored along Z.
-func (v *VillageGrid) buildChurch(hx, hz, surfY, facing int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, torch, stairs, door, slab, air, bell uint16) {
+func (v *VillageGrid) buildChurch(hx, hz, surfY, facing int, place func(wx, y, wz int, state uint16), log, planks, cobble, glass, torch, stairs, door, slab, air, bell, fence uint16) {
 	// For facing=0, mirror the Z axis. The church extends 11 blocks in Z (0..10).
 	// We mirror: dz -> 10 - dz, and swap door meta and stair orientations.
 	const totalZ = 10 // hallMaxZ
@@ -1560,7 +1619,7 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY, facing int, place func(wx, y, w
 					meta = 2
 				}
 				state = (blockID << 4) | meta
-			} else if blockID == 53 { // oak stairs
+			} else if blockID == stairs>>4 {
 				if meta == 2 {
 					meta = 3
 				} else if meta == 3 {
@@ -1666,8 +1725,8 @@ func (v *VillageGrid) buildChurch(hx, hz, surfY, facing int, place func(wx, y, w
 	}
 
 	// 2. Hanging Bell
-	place(hx+2, surfY+towerHeight+5, hz+2, 85<<4) // Extra fence to attach to roof
-	place(hx+2, surfY+towerHeight+4, hz+2, 85<<4) // Fence hanging from belfry roof center
+	place(hx+2, surfY+towerHeight+5, hz+2, fence) // Extra fence to attach to roof
+	place(hx+2, surfY+towerHeight+4, hz+2, fence) // Fence hanging from belfry roof center
 	place(hx+2, surfY+towerHeight+3, hz+2, bell)  // The Gold Bell
 
 	// Cobblestone stair in front of door so entrance is accessible.

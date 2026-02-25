@@ -55,19 +55,17 @@ func ReadPacket(r io.Reader) (*Packet, error) {
 }
 
 // WritePacket writes a full packet to the writer.
+// WritePacket writes a full packet to the writer using a single buffered write.
 func WritePacket(w io.Writer, p *Packet) error {
 	idSize := VarIntSize(p.ID)
 	totalLen := int32(idSize + len(p.Data))
 
-	_, err := WriteVarInt(w, totalLen)
-	if err != nil {
-		return err
-	}
-	_, err = WriteVarInt(w, p.ID)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(p.Data)
+	buf := bytes.NewBuffer(make([]byte, 0, VarIntSize(totalLen)+int(totalLen)))
+	WriteVarInt(buf, totalLen)
+	WriteVarInt(buf, p.ID)
+	buf.Write(p.Data)
+
+	_, err := w.Write(buf.Bytes())
 	return err
 }
 

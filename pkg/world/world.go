@@ -2,6 +2,7 @@ package world
 
 import (
 	"math/rand"
+	"runtime"
 	"sync"
 )
 
@@ -27,14 +28,21 @@ type World struct {
 	blocks map[BlockPos]uint16 // manual block overrides (set by SetBlock)
 	chunks map[ChunkPos]*Chunk // realized chunk cache
 	Gen    *Generator
+	genSem chan struct{} // Semaphore to limit concurrent chunk generations
 }
 
 // NewWorld creates a new World with the given seed for terrain generation.
 func NewWorld(seed int64) *World {
+	// Limit concurrent chunk generation to the number of CPUs, minimum 2
+	maxConcurrent := runtime.NumCPU()
+	if maxConcurrent < 2 {
+		maxConcurrent = 2
+	}
 	return &World{
 		blocks: make(map[BlockPos]uint16),
 		chunks: make(map[ChunkPos]*Chunk),
 		Gen:    NewGenerator(seed),
+		genSem: make(chan struct{}, maxConcurrent),
 	}
 }
 
@@ -61,20 +69,24 @@ func (w *World) GetBlock(x, y, z int32) uint16 {
 	}
 	w.mu.RUnlock()
 
-	// Realize chunk
-	w.mu.Lock()
-	// Double-check after lock
-	if chunk, ok := w.chunks[cp]; ok {
-		w.mu.Unlock()
-		lx, ly, lz := x&0x0F, y&0x0F, z&0x0F
-		sec := y >> 4
-		return chunk.Sections[sec][(ly*16+lz)*16+lx]
-	}
-
+	// Realize chunk outside of lock to avoid stalling the entire server
+	// Apply global concurrency limit so multiple players logging in at once don't saturate CPU
+	w.genSem <- struct{}{}
 	sections, biomes := w.Gen.GenerateInternal(int(cp.X), int(cp.Z))
+	<-w.genSem
+
 	chunk := &Chunk{
 		Sections: sections,
 		Biomes:   biomes,
+	}
+
+	w.mu.Lock()
+	// Check again in case another goroutine generated it while we were unlocked
+	if existingChunk, ok := w.chunks[cp]; ok {
+		w.mu.Unlock()
+		lx, ly, lz := x&0x0F, y&0x0F, z&0x0F
+		sec := y >> 4
+		return existingChunk.Sections[sec][(ly*16+lz)*16+lx]
 	}
 
 	// Apply ALL existing overrides for this chunk to the realized chunk
@@ -128,18 +140,22 @@ func (w *World) GetChunkData(cx, cz int32) ([]byte, uint16) {
 	}
 	w.mu.RUnlock()
 
-	// Realize chunk
-	w.mu.Lock()
-	if chunk, ok := w.chunks[cp]; ok {
-		data, mask := SerializeSections(&chunk.Sections, chunk.Biomes)
-		w.mu.Unlock()
-		return data, mask
-	}
-
+	// Realize chunk outside of lock
+	// Apply global concurrency limit so multiple players logging in at once don't saturate CPU
+	w.genSem <- struct{}{}
 	sections, biomes := w.Gen.GenerateInternal(int(cx), int(cz))
+	<-w.genSem
+
 	chunk := &Chunk{
 		Sections: sections,
 		Biomes:   biomes,
+	}
+
+	w.mu.Lock()
+	if existingChunk, ok := w.chunks[cp]; ok {
+		data, mask := SerializeSections(&existingChunk.Sections, existingChunk.Biomes)
+		w.mu.Unlock()
+		return data, mask
 	}
 
 	// Apply ALL existing overrides for this chunk to the realized chunk

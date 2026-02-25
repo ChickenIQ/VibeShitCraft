@@ -48,6 +48,7 @@ type Player struct {
 	DragSlots        []int16 // Slots being dragged over in mode 5
 	DragButton       int     // 0=left drag, 1=right drag
 	trackedEntities  map[int32]bool
+	ChunkQueue       chan ChunkPos // Queue for chunks that need to be generated and sent
 	mu               sync.Mutex
 }
 
@@ -88,6 +89,7 @@ func (s *Server) handleLoginStart(conn net.Conn, pkt *protocol.Packet) (*Player,
 		IsDead:          false,
 		NoClip:          s.config.DefaultGameMode == GameModeSpectator,
 		trackedEntities: make(map[int32]bool),
+		ChunkQueue:      make(chan ChunkPos, 1024), // Buffer large enough for a view distance of 10+
 	}
 
 	// Initialize all inventory slots as empty
@@ -123,7 +125,7 @@ func (s *Server) handlePlay(player *Player) {
 		protocol.WriteByte(w, 0)                         // Dimension: overworld
 		protocol.WriteByte(w, 0)                         // Difficulty: peaceful
 		protocol.WriteByte(w, byte(s.config.MaxPlayers)) // Max players
-		protocol.WriteString(w, "default")               // Level type
+		protocol.WriteString(w, "flat")                  // Level type: flat disables void fog
 		protocol.WriteBool(w, false)                     // Reduced debug info
 	})
 	protocol.WritePacket(conn, joinGame)
@@ -161,6 +163,10 @@ func (s *Server) handlePlay(player *Player) {
 
 	log.Printf("Player %s (EID: %d) joined the game", player.Username, player.EntityID)
 
+	// Start chunk generation loop
+	stopChunkLoop := make(chan struct{})
+	go s.chunkGenerationLoop(player, stopChunkLoop)
+
 	// Start keep-alive ticker
 	stopKeepAlive := make(chan struct{})
 	go s.keepAliveLoop(player, stopKeepAlive)
@@ -178,6 +184,7 @@ func (s *Server) handlePlay(player *Player) {
 	go s.environmentLoop(player, stopEnv)
 
 	defer func() {
+		close(stopChunkLoop)
 		close(stopKeepAlive)
 		close(stopRegen)
 		close(stopPickup)
@@ -227,6 +234,21 @@ func (s *Server) handlePlay(player *Player) {
 		}
 
 		s.handlePlayPacket(player, pkt)
+	}
+}
+
+func (s *Server) chunkGenerationLoop(player *Player, stop chan struct{}) {
+	for {
+		select {
+		case <-stop:
+			return
+		case pos := <-player.ChunkQueue:
+			if generated := s.sendChunkColumn(player, pos.X, pos.Z); generated {
+				// Small sleep to allow other goroutines (like network ticks or physics) to process
+				// between heavy generate-and-serialize cycles
+				time.Sleep(5 * time.Millisecond)
+			}
+		}
 	}
 }
 
