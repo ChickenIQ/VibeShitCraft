@@ -49,6 +49,8 @@ type Player struct {
 	DragButton       int     // 0=left drag, 1=right drag
 	trackedEntities  map[int32]bool
 	ChunkQueue       chan ChunkPos // Queue for chunks that need to be generated and sent
+	FallStartY       float64      // Y position when the player started falling
+	IsFalling        bool         // Whether the player is currently falling
 	mu               sync.Mutex
 }
 
@@ -63,6 +65,25 @@ func (s *Server) handleLoginStart(conn net.Conn, pkt *protocol.Packet) (*Player,
 
 	// Generate offline-mode UUID (UUID v3 based on "OfflinePlayer:" + username)
 	uuid := offlineUUID(username)
+
+	// Kick any existing player with the same username to prevent duplicate logins
+	s.mu.RLock()
+	for _, existing := range s.players {
+		if existing.Username == username {
+			s.mu.RUnlock()
+			existing.mu.Lock()
+			if existing.Conn != nil {
+				existing.Conn.Close()
+			}
+			existing.mu.Unlock()
+			log.Printf("Kicked existing session for %s (duplicate login)", username)
+			// Give a moment for the old connection to clean up
+			time.Sleep(100 * time.Millisecond)
+			s.mu.RLock()
+			break
+		}
+	}
+	s.mu.RUnlock()
 
 	s.mu.Lock()
 	eid := s.nextEID
@@ -200,11 +221,40 @@ func (s *Server) handlePlay(player *Player) {
 		log.Printf("Player %s disconnected", player.Username)
 	}()
 
-	// Spawn this player for others and others for this player
-	s.spawnPlayerForOthers(player)
-	s.spawnOthersForPlayer(player)
+	// Add ALL existing players to this player's tab list (including self)
+	s.mu.RLock()
+	var allPlayers []*Player
+	for _, p := range s.players {
+		allPlayers = append(allPlayers, p)
+	}
+	s.mu.RUnlock()
 
-	// Add self to own tab list so the player can see themselves
+	// Send tab list entries for all existing players to the new player
+	for _, other := range allPlayers {
+		other.mu.Lock()
+		otherUUID := other.UUID
+		otherName := other.Username
+		otherMode := other.GameMode
+		other.mu.Unlock()
+
+		listAdd := protocol.MarshalPacket(0x38, func(w *bytes.Buffer) {
+			protocol.WriteVarInt(w, 0) // Action: Add Player
+			protocol.WriteVarInt(w, 1) // Number of players
+			protocol.WriteUUID(w, otherUUID)
+			protocol.WriteString(w, otherName)
+			protocol.WriteVarInt(w, 0)                  // Number of properties
+			protocol.WriteVarInt(w, int32(otherMode))   // Gamemode
+			protocol.WriteVarInt(w, 0)                  // Ping
+			protocol.WriteBool(w, false)                // Has display name
+		})
+		player.mu.Lock()
+		if player.Conn != nil {
+			protocol.WritePacket(player.Conn, listAdd)
+		}
+		player.mu.Unlock()
+	}
+
+	// Add self to own tab list
 	selfListAdd := protocol.MarshalPacket(0x38, func(w *bytes.Buffer) {
 		protocol.WriteVarInt(w, 0) // Action: Add Player
 		protocol.WriteVarInt(w, 1) // Number of players
@@ -218,6 +268,13 @@ func (s *Server) handlePlay(player *Player) {
 	player.mu.Lock()
 	protocol.WritePacket(player.Conn, selfListAdd)
 	player.mu.Unlock()
+
+	// Broadcast this player's tab list entry to ALL existing players
+	s.broadcastPlayerListAdd(player)
+
+	// Spawn this player for others and others for this player
+	s.spawnPlayerForOthers(player)
+	s.spawnOthersForPlayer(player)
 
 	// Spawn existing item entities for this player
 	s.spawnEntitiesForPlayer(player)
@@ -308,7 +365,17 @@ func (s *Server) environmentLoop(player *Player, stop chan struct{}) {
 		case <-stop:
 			return
 		case <-ticker.C:
-			// Fast check without locking player
+			// Void damage: kill players below Y=0
+			player.mu.Lock()
+			if !player.IsDead && player.Y < 0 &&
+				player.GameMode != GameModeCreative && player.GameMode != GameModeSpectator {
+				player.mu.Unlock()
+				s.applyDamage(player, 4.0, "fell out of the world")
+			} else {
+				player.mu.Unlock()
+			}
+
+			// Acid water damage
 			if !s.GameRuleBool("acidWater") {
 				continue
 			}
